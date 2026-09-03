@@ -80,14 +80,6 @@ DEFAULT_TTS_LANGUAGE: Final = "en"
 DEFAULT_TTS_AUDIO_FORMAT: Final = "mp3"
 DEFAULT_TTS_SAMPLE_RATE: Final = 24000
 
-# Built-in voice list (https://soniox.com/docs/tts/models — all voices speak all languages).
-TTS_VOICES: Final = [
-    "Maya", "Daniel", "Noah", "Nina", "Emma", "Jack", "Adrian", "Claire",
-    "Grace", "Owen", "Mina", "Kenji", "Rafael", "Mateo", "Lucia", "Sofia",
-    "Oliver", "Arthur", "Isla", "Victoria", "Cooper", "Mason", "Ruby",
-    "Elise", "Arjun", "Rohan", "Priya", "Meera",
-]
-
 # Curated subset of the 60+ languages Soniox advertises. Used as the
 # advertised supported_languages list for both STT and TTS — the Soniox
 # models actually handle far more codes, but Home Assistant prefers a

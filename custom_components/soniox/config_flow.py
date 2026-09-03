@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from typing import Any
 
 import aiohttp
@@ -23,6 +24,7 @@ from homeassistant.helpers.selector import (
     SelectSelectorMode,
 )
 
+from .catalog import CatalogFetchError, async_fetch_catalog
 from .const import (
     CONF_API_KEY,
     CONF_REGION,
@@ -50,7 +52,6 @@ from .const import (
     STT_REALTIME_MODELS,
     SUPPORTED_LANGUAGES,
     TTS_MODELS,
-    TTS_VOICES,
     endpoints_for_region,
 )
 
@@ -225,11 +226,53 @@ class SonioxOptionsFlow(OptionsFlow):
             return self.async_create_entry(title="", data=user_input)
 
         opts = self.config_entry.options
+        voice_options: list[SelectOptionDict] = []
+        errors: dict[str, str] = {}
+
+        try:
+            catalog = await async_fetch_catalog(
+                async_get_clientsession(self.hass),
+                endpoints_for_region(
+                    self.config_entry.data.get(CONF_REGION, DEFAULT_REGION)
+                ),
+                self.config_entry.data[CONF_API_KEY],
+            )
+        except CatalogFetchError:
+            errors["base"] = "cannot_connect"
+        else:
+            model = catalog.models.get(
+                opts.get(CONF_TTS_MODEL, DEFAULT_TTS_MODEL)
+            )
+            if model is not None:
+                voice_options = [
+                    SelectOptionDict(value=voice.voice_id, label=voice.label)
+                    for voice in (*model.voices, *model.custom_voices)
+                ]
+
+        # Guarantee the default (or saved) voice is a valid choice so the form
+        # stays savable even when the catalog is unavailable / lists no voices.
+        fallback_voice = opts.get(CONF_TTS_VOICE, DEFAULT_TTS_VOICE)
+        if fallback_voice not in {
+            option["value"] for option in voice_options
+        }:
+            voice_options.append(
+                SelectOptionDict(value=fallback_voice, label=fallback_voice)
+            )
+
+        return self.async_show_form(
+            step_id="init",
+            data_schema=self._options_schema(opts, voice_options),
+            errors=errors,
+        )
+
+    def _options_schema(
+        self,
+        opts: Mapping[str, Any],
+        voice_options: list[SelectOptionDict],
+    ) -> vol.Schema:
+        """Build the options form schema."""
         lang_options = [
             SelectOptionDict(value=code, label=code) for code in SUPPORTED_LANGUAGES
-        ]
-        voice_options = [
-            SelectOptionDict(value=v, label=v) for v in TTS_VOICES
         ]
         format_options = [
             SelectOptionDict(value=f, label=f) for f in TTS_AUDIO_FORMATS
@@ -308,4 +351,5 @@ class SonioxOptionsFlow(OptionsFlow):
                 ),
             }
         )
-        return self.async_show_form(step_id="init", data_schema=schema)
+
+        return schema

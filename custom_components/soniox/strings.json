@@ -41,6 +41,9 @@
           "tts_sample_rate": "TTS sample rate (Hz, used for PCM/WAV)"
         }
       }
+    },
+    "error": {
+      "cannot_connect": "Could not refresh the Soniox voice catalog."
     }
   }
 }

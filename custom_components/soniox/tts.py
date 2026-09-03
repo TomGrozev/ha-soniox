@@ -47,7 +47,6 @@ from .const import (
     DOMAIN,
     REGION_LABELS,
     SUPPORTED_LANGUAGES,
-    TTS_VOICES,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -121,7 +120,12 @@ class SonioxTTSEntity(TextToSpeechEntity):
     @callback
     def async_get_supported_voices(self, language: str) -> list[Voice]:
         # Soniox voices speak every supported language, so the same list applies.
-        return [Voice(voice_id=v, name=v) for v in TTS_VOICES]
+        # Pull from the pre-parsed live catalog; a miss on the selected model
+        # degrades to an empty picker rather than a stale hardcoded list.
+        model_id = self._entry.options.get(CONF_TTS_MODEL, DEFAULT_TTS_MODEL)
+        model = self._entry.runtime_data.catalog.models.get(model_id)
+        voices = model.voices + model.custom_voices if model else ()
+        return [Voice(voice_id=v.voice_id, name=v.label) for v in voices]
 
     async def async_get_tts_audio(
         self, message: str, language: str, options: dict[str, Any]
