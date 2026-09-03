@@ -134,7 +134,7 @@ class SonioxTTSEntity(TextToSpeechEntity):
 
         try:
             async with session.post(
-                self._entry.runtime_data.tts_rest_url,
+                self._entry.runtime_data.endpoints.tts_rest_url,
                 json=body,
                 headers={"Authorization": f"Bearer {api_key}"},
                 timeout=aiohttp.ClientTimeout(total=60),
@@ -233,7 +233,7 @@ class SonioxTTSEntity(TextToSpeechEntity):
 
         try:
             async with session.ws_connect(
-                self._entry.runtime_data.tts_websocket_url,
+                self._entry.runtime_data.endpoints.tts_websocket_url,
                 heartbeat=30,
                 max_msg_size=0,
             ) as ws:

@@ -162,7 +162,7 @@ class SonioxSTTEntity(SpeechToTextEntity):
         session = async_get_clientsession(self.hass)
         try:
             async with session.ws_connect(
-                self._entry.runtime_data.stt_websocket_url,
+                self._entry.runtime_data.endpoints.stt_websocket_url,
                 heartbeat=30,
                 max_msg_size=0,
             ) as ws:
@@ -298,7 +298,7 @@ class SonioxSTTEntity(SpeechToTextEntity):
             content_type="audio/wav",
         )
         async with session.post(
-            self._entry.runtime_data.stt_files_url,
+            self._entry.runtime_data.endpoints.stt_files_url,
             data=form,
             headers=headers,
             timeout=aiohttp.ClientTimeout(total=60),
@@ -328,7 +328,7 @@ class SonioxSTTEntity(SpeechToTextEntity):
             "client_reference_id": "home-assistant",
         }
         async with session.post(
-            self._entry.runtime_data.stt_transcriptions_url,
+            self._entry.runtime_data.endpoints.stt_transcriptions_url,
             json=body,
             headers=headers,
             timeout=aiohttp.ClientTimeout(total=30),
@@ -354,7 +354,7 @@ class SonioxSTTEntity(SpeechToTextEntity):
         transcription_id: str,
     ) -> bool:
         deadline = time.monotonic() + _ASYNC_TIMEOUT
-        url = f"{self._entry.runtime_data.stt_transcriptions_url}/{transcription_id}"
+        url = f"{self._entry.runtime_data.endpoints.stt_transcriptions_url}/{transcription_id}"
         while True:
             async with session.get(
                 url,
@@ -392,7 +392,7 @@ class SonioxSTTEntity(SpeechToTextEntity):
         headers: dict[str, str],
         transcription_id: str,
     ) -> str | None:
-        url = f"{self._entry.runtime_data.stt_transcriptions_url}/{transcription_id}/transcript"
+        url = f"{self._entry.runtime_data.endpoints.stt_transcriptions_url}/{transcription_id}/transcript"
         async with session.get(
             url,
             headers=headers,
@@ -425,7 +425,7 @@ class SonioxSTTEntity(SpeechToTextEntity):
         if transcription_id:
             try:
                 async with session.delete(
-                    f"{self._entry.runtime_data.stt_transcriptions_url}/{transcription_id}",
+                    f"{self._entry.runtime_data.endpoints.stt_transcriptions_url}/{transcription_id}",
                     headers=headers,
                     timeout=aiohttp.ClientTimeout(total=10),
                 ) as resp:
@@ -440,7 +440,7 @@ class SonioxSTTEntity(SpeechToTextEntity):
         if file_id:
             try:
                 async with session.delete(
-                    f"{self._entry.runtime_data.stt_files_url}/{file_id}",
+                    f"{self._entry.runtime_data.endpoints.stt_files_url}/{file_id}",
                     headers=headers,
                     timeout=aiohttp.ClientTimeout(total=10),
                 ) as resp:

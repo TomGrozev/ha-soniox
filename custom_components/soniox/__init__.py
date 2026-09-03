@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
+from .catalog import SonioxCatalog, async_fetch_catalog
 from .const import (
+    CONF_API_KEY,
     CONF_REGION,
     CONF_STT_ASYNC_MODEL,
     CONF_STT_MODEL,
@@ -37,14 +41,32 @@ _LEGACY_MODELS = {
     "tts-rt-v1-preview": DEFAULT_TTS_MODEL,
 }
 
-type SonioxConfigEntry = ConfigEntry[SonioxEndpoints]
+@dataclass(frozen=True)
+class SonioxRuntimeData:
+    """Per-config-entry runtime state.
+
+    Holds the resolved regional endpoints and the single live catalog
+    (models + custom voices) fetched once at config-entry setup.
+    """
+
+    endpoints: SonioxEndpoints
+    catalog: SonioxCatalog
+
+
+type SonioxConfigEntry = ConfigEntry[SonioxRuntimeData]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: SonioxConfigEntry) -> bool:
     """Set up Soniox from a config entry."""
-    entry.runtime_data = endpoints_for_region(
+    endpoints = endpoints_for_region(
         entry.data.get(CONF_REGION, DEFAULT_REGION)
     )
+    catalog = await async_fetch_catalog(
+        async_get_clientsession(hass),
+        endpoints,
+        entry.data[CONF_API_KEY],
+    )
+    entry.runtime_data = SonioxRuntimeData(endpoints=endpoints, catalog=catalog)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     return True
