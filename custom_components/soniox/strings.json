@@ -38,7 +38,8 @@
           "tts_voice": "Default TTS voice",
           "tts_language": "Default TTS language",
           "tts_audio_format": "TTS audio format",
-          "tts_sample_rate": "TTS sample rate (Hz, used for PCM/WAV)"
+          "tts_sample_rate": "TTS sample rate (Hz, used for PCM/WAV)",
+          "tts_speed": "Default speaking speed"
         }
       }
     },

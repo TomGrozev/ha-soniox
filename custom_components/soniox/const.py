@@ -17,6 +17,9 @@ CONF_TTS_VOICE: Final = "tts_voice"
 CONF_TTS_LANGUAGE: Final = "tts_language"
 CONF_TTS_AUDIO_FORMAT: Final = "tts_audio_format"
 CONF_TTS_SAMPLE_RATE: Final = "tts_sample_rate"
+CONF_TTS_SPEED: Final = "tts_speed"
+DEFAULT_TTS_SPEED: Final = 1.0
+ATTR_SPEED: Final = "speed"  # per-request option key (not an HA constant)
 
 # Regional deployments (https://soniox.com/docs/data-residency)
 REGION_US: Final = "us"

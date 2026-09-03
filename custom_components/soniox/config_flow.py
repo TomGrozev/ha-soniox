@@ -8,7 +8,6 @@ from typing import Any
 
 import aiohttp
 import voluptuous as vol
-
 from homeassistant.config_entries import (
     ConfigEntry,
     ConfigFlow,
@@ -18,13 +17,16 @@ from homeassistant.config_entries import (
 from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
+    NumberSelector,
+    NumberSelectorConfig,
+    NumberSelectorMode,
     SelectOptionDict,
     SelectSelector,
     SelectSelectorConfig,
     SelectSelectorMode,
 )
 
-from .catalog import CatalogFetchError, async_fetch_catalog
+from .catalog import CatalogFetchError, CatalogModel, async_fetch_catalog
 from .const import (
     CONF_API_KEY,
     CONF_REGION,
@@ -34,6 +36,7 @@ from .const import (
     CONF_TTS_LANGUAGE,
     CONF_TTS_MODEL,
     CONF_TTS_SAMPLE_RATE,
+    CONF_TTS_SPEED,
     CONF_TTS_VOICE,
     DEFAULT_REGION,
     DEFAULT_STT_ASYNC_MODEL,
@@ -42,6 +45,7 @@ from .const import (
     DEFAULT_TTS_LANGUAGE,
     DEFAULT_TTS_MODEL,
     DEFAULT_TTS_SAMPLE_RATE,
+    DEFAULT_TTS_SPEED,
     DEFAULT_TTS_VOICE,
     DOMAIN,
     REGION_EU,
@@ -223,11 +227,20 @@ class SonioxOptionsFlow(OptionsFlow):
                 )
             except (KeyError, TypeError, ValueError):
                 user_input[CONF_TTS_SAMPLE_RATE] = DEFAULT_TTS_SAMPLE_RATE
+            # Preserve a previously saved speed when the form held no speed
+            # field (fetch failure or model without speed adjustment).
+            user_input.setdefault(
+                CONF_TTS_SPEED,
+                self.config_entry.options.get(
+                    CONF_TTS_SPEED, DEFAULT_TTS_SPEED
+                ),
+            )
             return self.async_create_entry(title="", data=user_input)
 
         opts = self.config_entry.options
         voice_options: list[SelectOptionDict] = []
         errors: dict[str, str] = {}
+        self._speed_model: CatalogModel | None = None
 
         try:
             catalog = await async_fetch_catalog(
@@ -244,6 +257,7 @@ class SonioxOptionsFlow(OptionsFlow):
                 opts.get(CONF_TTS_MODEL, DEFAULT_TTS_MODEL)
             )
             if model is not None:
+                self._speed_model = model
                 voice_options = [
                     SelectOptionDict(value=voice.voice_id, label=voice.label)
                     for voice in (*model.voices, *model.custom_voices)
@@ -288,68 +302,82 @@ class SonioxOptionsFlow(OptionsFlow):
         )
         tts_model_options = _model_options(TTS_MODELS, opts.get(CONF_TTS_MODEL))
 
-        schema = vol.Schema(
-            {
-                vol.Optional(
-                    CONF_STT_MODEL,
-                    default=opts.get(CONF_STT_MODEL, DEFAULT_STT_MODEL),
-                ): SelectSelector(
-                    SelectSelectorConfig(
-                        options=stt_model_options, mode=SelectSelectorMode.DROPDOWN
-                    )
+        schema_fields: dict[vol.Marker, Any] = {
+            vol.Optional(
+                CONF_STT_MODEL,
+                default=opts.get(CONF_STT_MODEL, DEFAULT_STT_MODEL),
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=stt_model_options, mode=SelectSelectorMode.DROPDOWN
+                )
+            ),
+            vol.Optional(
+                CONF_STT_ASYNC_MODEL,
+                default=opts.get(CONF_STT_ASYNC_MODEL, DEFAULT_STT_ASYNC_MODEL),
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=stt_async_model_options,
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Optional(
+                CONF_TTS_MODEL,
+                default=opts.get(CONF_TTS_MODEL, DEFAULT_TTS_MODEL),
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=tts_model_options, mode=SelectSelectorMode.DROPDOWN
+                )
+            ),
+            vol.Optional(
+                CONF_TTS_VOICE,
+                default=opts.get(CONF_TTS_VOICE, DEFAULT_TTS_VOICE),
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=voice_options, mode=SelectSelectorMode.DROPDOWN
+                )
+            ),
+            vol.Optional(
+                CONF_TTS_LANGUAGE,
+                default=opts.get(CONF_TTS_LANGUAGE, DEFAULT_TTS_LANGUAGE),
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=lang_options, mode=SelectSelectorMode.DROPDOWN
+                )
+            ),
+            vol.Optional(
+                CONF_TTS_AUDIO_FORMAT,
+                default=opts.get(CONF_TTS_AUDIO_FORMAT, DEFAULT_TTS_AUDIO_FORMAT),
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=format_options, mode=SelectSelectorMode.DROPDOWN
+                )
+            ),
+            vol.Optional(
+                CONF_TTS_SAMPLE_RATE,
+                default=str(
+                    opts.get(CONF_TTS_SAMPLE_RATE, DEFAULT_TTS_SAMPLE_RATE)
                 ),
-                vol.Optional(
-                    CONF_STT_ASYNC_MODEL,
-                    default=opts.get(CONF_STT_ASYNC_MODEL, DEFAULT_STT_ASYNC_MODEL),
-                ): SelectSelector(
-                    SelectSelectorConfig(
-                        options=stt_async_model_options,
-                        mode=SelectSelectorMode.DROPDOWN,
-                    )
-                ),
-                vol.Optional(
-                    CONF_TTS_MODEL,
-                    default=opts.get(CONF_TTS_MODEL, DEFAULT_TTS_MODEL),
-                ): SelectSelector(
-                    SelectSelectorConfig(
-                        options=tts_model_options, mode=SelectSelectorMode.DROPDOWN
-                    )
-                ),
-                vol.Optional(
-                    CONF_TTS_VOICE,
-                    default=opts.get(CONF_TTS_VOICE, DEFAULT_TTS_VOICE),
-                ): SelectSelector(
-                    SelectSelectorConfig(
-                        options=voice_options, mode=SelectSelectorMode.DROPDOWN
-                    )
-                ),
-                vol.Optional(
-                    CONF_TTS_LANGUAGE,
-                    default=opts.get(CONF_TTS_LANGUAGE, DEFAULT_TTS_LANGUAGE),
-                ): SelectSelector(
-                    SelectSelectorConfig(
-                        options=lang_options, mode=SelectSelectorMode.DROPDOWN
-                    )
-                ),
-                vol.Optional(
-                    CONF_TTS_AUDIO_FORMAT,
-                    default=opts.get(CONF_TTS_AUDIO_FORMAT, DEFAULT_TTS_AUDIO_FORMAT),
-                ): SelectSelector(
-                    SelectSelectorConfig(
-                        options=format_options, mode=SelectSelectorMode.DROPDOWN
-                    )
-                ),
-                vol.Optional(
-                    CONF_TTS_SAMPLE_RATE,
-                    default=str(
-                        opts.get(CONF_TTS_SAMPLE_RATE, DEFAULT_TTS_SAMPLE_RATE)
-                    ),
-                ): SelectSelector(
-                    SelectSelectorConfig(
-                        options=sample_rate_options, mode=SelectSelectorMode.DROPDOWN
-                    )
-                ),
-            }
-        )
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=sample_rate_options, mode=SelectSelectorMode.DROPDOWN
+                )
+            ),
+        }
 
-        return schema
+        # Expose the speed slider only for models that support speed adjustment;
+        # the model comes from the fresh fetch in async_step_init.
+        model = self._speed_model
+        if model is not None and model.supports_speed_adjustment:
+            schema_fields[vol.Optional(
+                CONF_TTS_SPEED,
+                default=opts.get(CONF_TTS_SPEED, DEFAULT_TTS_SPEED),
+            )] = NumberSelector(
+                NumberSelectorConfig(
+                    min=model.speed_min,
+                    max=model.speed_max,
+                    step=0.05,
+                    mode=NumberSelectorMode.SLIDER,
+                )
+            )
+
+        return vol.Schema(schema_fields)

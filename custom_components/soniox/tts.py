@@ -11,16 +11,15 @@ from collections.abc import AsyncGenerator
 from typing import Any
 
 import aiohttp
-
 from homeassistant.components.tts import (
     ATTR_AUDIO_OUTPUT,
     ATTR_PREFERRED_FORMAT,
     ATTR_PREFERRED_SAMPLE_RATE,
     ATTR_VOICE,
     TextToSpeechEntity,
-    TtsAudioType,
     TTSAudioRequest,
     TTSAudioResponse,
+    TtsAudioType,
     Voice,
 )
 from homeassistant.core import HomeAssistant, callback
@@ -30,19 +29,23 @@ from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import SonioxConfigEntry
+from .catalog import DEFAULT_SPEED_MAX, DEFAULT_SPEED_MIN
 from .const import (
+    ATTR_SPEED,
     CONF_API_KEY,
     CONF_REGION,
     CONF_TTS_AUDIO_FORMAT,
     CONF_TTS_LANGUAGE,
     CONF_TTS_MODEL,
     CONF_TTS_SAMPLE_RATE,
+    CONF_TTS_SPEED,
     CONF_TTS_VOICE,
     DEFAULT_REGION,
     DEFAULT_TTS_AUDIO_FORMAT,
     DEFAULT_TTS_LANGUAGE,
     DEFAULT_TTS_MODEL,
     DEFAULT_TTS_SAMPLE_RATE,
+    DEFAULT_TTS_SPEED,
     DEFAULT_TTS_VOICE,
     DOMAIN,
     REGION_LABELS,
@@ -103,6 +106,7 @@ class SonioxTTSEntity(TextToSpeechEntity):
     def supported_options(self) -> list[str]:
         return [
             ATTR_VOICE,
+            ATTR_SPEED,
             ATTR_AUDIO_OUTPUT,
             ATTR_PREFERRED_FORMAT,
             ATTR_PREFERRED_SAMPLE_RATE,
@@ -112,6 +116,7 @@ class SonioxTTSEntity(TextToSpeechEntity):
     def default_options(self) -> dict[str, Any]:
         return {
             ATTR_VOICE: self._entry.options.get(CONF_TTS_VOICE, DEFAULT_TTS_VOICE),
+            ATTR_SPEED: self._entry.options.get(CONF_TTS_SPEED, DEFAULT_TTS_SPEED),
             ATTR_AUDIO_OUTPUT: self._entry.options.get(
                 CONF_TTS_AUDIO_FORMAT, DEFAULT_TTS_AUDIO_FORMAT
             ),
@@ -196,6 +201,37 @@ class SonioxTTSEntity(TextToSpeechEntity):
             self._entry.options.get(CONF_TTS_SAMPLE_RATE, DEFAULT_TTS_SAMPLE_RATE)
         )
 
+    def _resolve_speed(self, options: dict[str, Any]) -> float | None:
+        """Resolve the effective Soniox speed.
+
+        Returns None when the selected model lacks speed adjustment (speed not
+        sent). Clamps the per-request ATTR_SPEED value, else the CONF_TTS_SPEED
+        option default, to the model's speed_min/speed_max. Missing catalog model
+        entry ⇒ fall back to the payload default bounds (catalog defaults
+        0.7/1.3 surface through CatalogModel when the payload omits bounds).
+        """
+        model_id = self._entry.options.get(CONF_TTS_MODEL, DEFAULT_TTS_MODEL)
+        model = self._entry.runtime_data.catalog.models.get(model_id)
+        if model is not None and not model.supports_speed_adjustment:
+            return None
+
+        try:
+            speed = float(
+                options.get(
+                    ATTR_SPEED,
+                    self._entry.options.get(CONF_TTS_SPEED, DEFAULT_TTS_SPEED),
+                )
+            )
+        except (TypeError, ValueError):
+            _LOGGER.debug(
+                "Soniox TTS invalid speed value: %r", options.get(ATTR_SPEED)
+            )
+            return None
+
+        speed_min = model.speed_min if model is not None else DEFAULT_SPEED_MIN
+        speed_max = model.speed_max if model is not None else DEFAULT_SPEED_MAX
+        return max(speed_min, min(speed_max, speed))
+
     def _build_request_body(
         self, message: str, language: str, options: dict[str, Any]
     ) -> dict[str, Any]:
@@ -218,6 +254,8 @@ class SonioxTTSEntity(TextToSpeechEntity):
             body["sample_rate"] = int(
                 self._entry.options.get(CONF_TTS_SAMPLE_RATE, DEFAULT_TTS_SAMPLE_RATE)
             )
+        if (speed := self._resolve_speed(options)) is not None:
+            body["speed"] = speed
         return body
 
     async def _stream_audio(
@@ -251,6 +289,8 @@ class SonioxTTSEntity(TextToSpeechEntity):
                 }
                 if audio_format.startswith("pcm") or audio_format == "wav":
                     config["sample_rate"] = sample_rate
+                if (speed := self._resolve_speed(request.options)) is not None:
+                    config["speed"] = speed
                 await ws.send_json(config)
 
                 async def pump_text() -> None:
@@ -294,8 +334,8 @@ class SonioxTTSEntity(TextToSpeechEntity):
                     pump_task.cancel()
                     try:
                         await pump_task
-                    except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                        pass
+                    except (asyncio.CancelledError, Exception) as err:  # noqa: BLE001
+                        _LOGGER.debug("Soniox TTS stream pump cancelled: %s", err)
         except aiohttp.ClientError as err:
             raise HomeAssistantError(
                 f"Soniox TTS streaming connection failed: {err}"
