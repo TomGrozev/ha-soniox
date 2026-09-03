@@ -12,7 +12,6 @@ from typing import Any
 
 import aiohttp
 from homeassistant.components.tts import (
-    ATTR_AUDIO_OUTPUT,
     ATTR_PREFERRED_FORMAT,
     ATTR_PREFERRED_SAMPLE_RATE,
     ATTR_VOICE,
@@ -107,7 +106,6 @@ class SonioxTTSEntity(TextToSpeechEntity):
         return [
             ATTR_VOICE,
             ATTR_SPEED,
-            ATTR_AUDIO_OUTPUT,
             ATTR_PREFERRED_FORMAT,
             ATTR_PREFERRED_SAMPLE_RATE,
         ]
@@ -117,9 +115,6 @@ class SonioxTTSEntity(TextToSpeechEntity):
         return {
             ATTR_VOICE: self._entry.options.get(CONF_TTS_VOICE, DEFAULT_TTS_VOICE),
             ATTR_SPEED: self._entry.options.get(CONF_TTS_SPEED, DEFAULT_TTS_SPEED),
-            ATTR_AUDIO_OUTPUT: self._entry.options.get(
-                CONF_TTS_AUDIO_FORMAT, DEFAULT_TTS_AUDIO_FORMAT
-            ),
         }
 
     @callback
@@ -178,17 +173,26 @@ class SonioxTTSEntity(TextToSpeechEntity):
     def _resolve_stream_format(self, options: dict[str, Any]) -> str:
         """Pick a chunk-friendly format so Assist can play audio immediately.
 
-        The entity default is mp3 (good for tts.speak files). Assist merges
-        that default into every request, which would force the WebSocket onto
-        a buffered container. Prefer wav/pcm instead.
+        The streaming path always prefers a chunk-friendly format; the saved
+        mp3 default is irrelevant here. Use wav/pcm unless the request asks
+        for another streamable format.
         """
         preferred = options.get(ATTR_PREFERRED_FORMAT)
-        if preferred in ("wav", "pcm", "pcm_s16le"):
+        if preferred == "pcm" or preferred in _STREAMABLE_FORMATS:
             return "wav" if preferred == "pcm" else preferred
-        explicit = options.get(ATTR_AUDIO_OUTPUT)
-        if explicit in _STREAMABLE_FORMATS:
-            return explicit
         return _STREAM_DEFAULT_FORMAT
+
+    def _resolve_request_format(self, options: dict[str, Any]) -> str:
+        """Resolve the codec for a one-shot REST request.
+
+        Callers request the output format on ATTR_PREFERRED_FORMAT (Assist
+        pipelines put tts_audio_output there); the saved options-flow default
+        is the fallback, keeping tts.speak file output on the saved format.
+        """
+        preferred = options.get(ATTR_PREFERRED_FORMAT)
+        if isinstance(preferred, str) and preferred:
+            return preferred
+        return self._entry.options.get(CONF_TTS_AUDIO_FORMAT, DEFAULT_TTS_AUDIO_FORMAT)
 
     def _resolve_sample_rate(self, options: dict[str, Any]) -> int:
         preferred = options.get(ATTR_PREFERRED_SAMPLE_RATE)
@@ -239,10 +243,7 @@ class SonioxTTSEntity(TextToSpeechEntity):
             ATTR_VOICE,
             self._entry.options.get(CONF_TTS_VOICE, DEFAULT_TTS_VOICE),
         )
-        audio_format = options.get(
-            ATTR_AUDIO_OUTPUT,
-            self._entry.options.get(CONF_TTS_AUDIO_FORMAT, DEFAULT_TTS_AUDIO_FORMAT),
-        )
+        audio_format = self._resolve_request_format(options)
         body: dict[str, Any] = {
             "model": self._entry.options.get(CONF_TTS_MODEL, DEFAULT_TTS_MODEL),
             "language": (language or self.default_language).split("-", 1)[0].lower(),

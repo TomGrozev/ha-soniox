@@ -66,7 +66,7 @@ Open the integration's **Configure** screen to set model and voice defaults:
 Per-service-call overrides:
 
 - `voice` — any voice name (Maya, Adrian, Kenji, Sofia, …).
-- `audio_output` — `mp3`, `wav`, or `pcm_s16le`.
+- `preferred_format` — `mp3`, `wav`, or `pcm_s16le` (Assist pipelines request their output format through this option).
 
 ## Use it in the Assist pipeline
 
