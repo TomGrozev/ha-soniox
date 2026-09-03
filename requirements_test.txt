@@ -1,0 +1,17 @@
+# Test harness for the Soniox integration (issue #2).
+#
+# pytest-homeassistant-custom-component bundles a pinned homeassistant and
+# every pytest plugin HA core development relies on (aiohttp request mocking,
+# freezegun, syrupy, pytest-socket, pytest-asyncio ...). mutagen and
+# ha-ffmpeg are HA component deps (tts/stt import paths) that phacc's
+# pin set does not include.
+#
+# The pin tracks the integration's declared HA floor (2025.12):
+# 0.13.301 == homeassistant 2025.12.4, requires Python >= 3.13.
+#
+# Install — see tests/README.md (the uv-managed CPython ships the C headers
+# that lru-dict, an HA 2025.12 dependency, needs to build):
+#   ../ha-soniox-tests/.venv/bin/python -m pytest -q
+pytest-homeassistant-custom-component==0.13.301
+mutagen==1.47.0
+ha-ffmpeg==3.2.2

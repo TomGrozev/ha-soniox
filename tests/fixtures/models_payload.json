@@ -1,0 +1,43 @@
+{
+  "models": [
+    {
+      "id": "tts-rt-v2",
+      "aliased_model_id": null,
+      "name": "TTS v2",
+      "voices": [
+        { "id": "Maya", "description": "A steady, clear voice", "gender": "female" },
+        { "id": "Daniel", "description": "Warm and articulate", "gender": "male" },
+        { "id": "Nina", "description": "Bright and friendly", "gender": "female" },
+        { "id": "Owen", "description": "Deep and calm", "gender": "male" }
+      ],
+      "languages": [
+        { "code": "en", "name": "English" },
+        { "code": "de", "name": "German" },
+        { "code": "ja", "name": "Japanese" }
+      ],
+      "supports_timestamps": false,
+      "supports_speed_adjustment": true,
+      "speed_min": 0.7,
+      "speed_max": 1.3,
+      "supports_silence_reduction": false
+    },
+    {
+      "id": "tts-rt-v1",
+      "aliased_model_id": null,
+      "name": "TTS v1",
+      "voices": [
+        { "id": "Maya", "description": "A steady, clear voice", "gender": "female" },
+        { "id": "Daniel", "description": "Warm and articulate", "gender": "male" }
+      ],
+      "languages": [
+        { "code": "en", "name": "English" },
+        { "code": "de", "name": "German" }
+      ],
+      "supports_timestamps": false,
+      "supports_speed_adjustment": false,
+      "speed_min": null,
+      "speed_max": null,
+      "supports_silence_reduction": false
+    }
+  ]
+}

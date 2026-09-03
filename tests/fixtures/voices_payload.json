@@ -1,0 +1,25 @@
+{
+  "voices": [
+    {
+      "id": "497f6eca-6276-4993-bfeb-53cbbbba6f08",
+      "name": "My Cloned Voice",
+      "filename": "reference.wav",
+      "created_at": "2026-01-15T10:30:00Z",
+      "models": [
+        {
+          "model": "tts-rt-v2",
+          "status": "ready",
+          "error_type": null,
+          "error_message": null
+        },
+        {
+          "model": "tts-rt-v1",
+          "status": "failed",
+          "error_type": "insufficient_audio",
+          "error_message": "Reference audio too short"
+        }
+      ]
+    }
+  ],
+  "next_page_cursor": null
+}
