@@ -5,6 +5,7 @@
   "config_flow": true,
   "dependencies": [],
   "documentation": "https://github.com/FrancescoMasaia/ha-soniox",
+  "homeassistant": "2025.12.0",
   "integration_type": "service",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/FrancescoMasaia/ha-soniox/issues",
