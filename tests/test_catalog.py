@@ -48,12 +48,12 @@ def test_builtin_voices_parse_with_gender_accent_labels():
 
     assert set(by_id) == {"Maya", "Daniel", "Nina", "Owen"}
     maya = by_id["Maya"]
-    assert maya.label == f"Maya {EM_DASH} female, A steady, clear voice"
+    assert maya.label == f"Maya {EM_DASH} female"
     assert maya.gender == "female"
     assert maya.accent == "A steady, clear voice"
     assert maya.custom is False
 
-    assert by_id["Owen"].label == f"Owen {EM_DASH} male, Deep and calm"
+    assert by_id["Owen"].label == f"Owen {EM_DASH} male"
     assert by_id["Nina"].gender == "female"
 
 

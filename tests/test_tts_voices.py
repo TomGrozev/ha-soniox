@@ -73,10 +73,10 @@ async def test_supported_voices_from_catalog(hass, aioclient_mock):
     ]
     by_id = {v.voice_id: v for v in voices}
 
-    assert by_id["Maya"].name == f"Maya {EM_DASH} female, A steady, clear voice"
-    assert by_id["Daniel"].name == f"Daniel {EM_DASH} male, Warm and articulate"
-    assert by_id["Nina"].name == f"Nina {EM_DASH} female, Bright and friendly"
-    assert by_id["Owen"].name == f"Owen {EM_DASH} male, Deep and calm"
+    assert by_id["Maya"].name == f"Maya {EM_DASH} female"
+    assert by_id["Daniel"].name == f"Daniel {EM_DASH} male"
+    assert by_id["Nina"].name == f"Nina {EM_DASH} female"
+    assert by_id["Owen"].name == f"Owen {EM_DASH} male"
     assert by_id[CUSTOM_VOICE_ID].name == f"My Cloned Voice {EM_DASH} custom"
 
 

@@ -104,8 +104,8 @@ async def test_options_init_builds_voice_dropdown_from_catalog(hass, aioclient_m
         "Owen",
         CUSTOM_VOICE_ID,
     }
-    assert by_value["Maya"] == f"Maya {EM_DASH} female, A steady, clear voice"
-    assert by_value["Owen"] == f"Owen {EM_DASH} male, Deep and calm"
+    assert by_value["Maya"] == f"Maya {EM_DASH} female"
+    assert by_value["Owen"] == f"Owen {EM_DASH} male"
     assert by_value[CUSTOM_VOICE_ID] == f"My Cloned Voice {EM_DASH} custom"
     # A hardcoded-era voice that the tts-rt-v2 catalog does not include is gone.
     assert "Emma" not in by_value

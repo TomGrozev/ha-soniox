@@ -28,7 +28,7 @@ class CatalogVoice:
     """A single TTS voice (built-in or custom)."""
 
     voice_id: str
-    label: str  # "Name — gender, accent" | "Name — gender" | bare name
+    label: str  # "Name — gender" | bare name
     gender: str = ""
     accent: str = ""
     custom: bool = False
@@ -70,11 +70,9 @@ def _string_field(entry: dict[str, Any], key: str) -> str | None:
     return None
 
 
-def _voice_label(name: str, gender: str, accent: str) -> str:
-    """Build a display label from optional gender and accent parts."""
+def _voice_label(name: str, gender: str) -> str:
+    """Build a display label from the name and optional gender part."""
     if gender:
-        if accent:
-            return f"{name} {_EM_DASH} {gender}, {accent}"
         return f"{name} {_EM_DASH} {gender}"
     return name
 
@@ -94,7 +92,7 @@ def _parse_voice(entry: Any) -> CatalogVoice | None:
         accent = ""
     return CatalogVoice(
         voice_id=voice_id,
-        label=_voice_label(voice_id, gender, accent),
+        label=_voice_label(voice_id, gender),
         gender=gender,
         accent=accent,
     )
