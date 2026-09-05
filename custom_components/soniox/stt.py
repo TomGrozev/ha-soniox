@@ -50,6 +50,12 @@ _LOGGER = logging.getLogger(__name__)
 _AUDIO_FORMAT = "pcm_s16le"
 _ASYNC_POLL_INTERVAL = 0.5
 _ASYNC_TIMEOUT = 90
+_CONTROL_TOKENS = frozenset({"<end>", "<fin>"})
+# Soniox control markers, not speech: <end> signals an endpoint-detected
+# segment boundary (https://soniox.com/docs/stt/rt/endpoint-detection) and
+# <fin> acknowledges a manual finalize. Both arrive as ordinary final
+# tokens, so transcript assembly must skip them or they end up glued
+# onto the text.
 
 
 async def async_setup_entry(
@@ -214,7 +220,12 @@ class SonioxSTTEntity(SpeechToTextEntity):
                         )
                         return None
                     for token in payload.get("tokens", []):
-                        if token.get("is_final") and (text := token.get("text")):
+                        text = token.get("text")
+                        if (
+                            token.get("is_final")
+                            and text
+                            and text.strip() not in _CONTROL_TOKENS
+                        ):
                             final_tokens.append(text)
                     if payload.get("finished"):
                         break
@@ -407,10 +418,17 @@ class SonioxSTTEntity(SpeechToTextEntity):
             payload = await resp.json()
         text = payload.get("text")
         if isinstance(text, str) and text.strip():
-            return text.strip()
+            stripped = text.rstrip()
+            for marker in _CONTROL_TOKENS:
+                stripped = stripped.removesuffix(marker)
+            return stripped.strip() or None
         tokens = payload.get("tokens") or []
         joined = "".join(
-            token.get("text", "") for token in tokens if isinstance(token, dict)
+            token["text"]
+            for token in tokens
+            if isinstance(token, dict)
+            and isinstance(token.get("text"), str)
+            and token["text"].strip() not in _CONTROL_TOKENS
         ).strip()
         return joined or None
 

@@ -38,7 +38,13 @@ class _FakeSonioxWebsocket:
     async def __aexit__(self, *exc):
         return False
 
-    def send_json(self, data, **_: object) -> None:
+    async def send_json(self, data, **_: object) -> None:
+        self.sent.append(data)
+
+    async def send_bytes(self, data, **_: object) -> None:
+        self.sent.append(data)
+
+    async def send_str(self, data, **_: object) -> None:
         self.sent.append(data)
 
     def __aiter__(self):
