@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import aiohttp
@@ -25,18 +26,29 @@ class _FakeSonioxWebsocket:
     is yielded unchanged so tests can push CLOSED/ERROR-style fakes.
     """
 
-    def __init__(self, incoming):
+    def __init__(self, incoming, connect_gate=None):
         self.incoming = list(incoming)
         self.sent = []
         self.url = None
         self.kwargs = None
+        # Issue #8 pool tests: hold the WS "open" (await this before the fake
+        # dial completes) so a warm-up can be scripted to stay in flight.
+        self.connect_gate = connect_gate
+        # Set when the pool explicitly closes the conn (borrowed teardown).
+        self.closed = False
         self._it = None
 
     async def __aenter__(self):
+        if self.connect_gate is not None:
+            await self.connect_gate.wait()
         return self
 
     async def __aexit__(self, *exc):
         return False
+
+    async def close(self):
+        """Track an explicit client-side close (pool-managed connections)."""
+        self.closed = True
 
     async def send_json(self, data, **_: object) -> None:
         self.sent.append(data)
@@ -54,15 +66,22 @@ class _FakeSonioxWebsocket:
     async def __anext__(self):
         if self._it is None:
             self._it = iter(self.incoming)
-        try:
-            item = next(self._it)
-        except StopIteration:
-            raise StopAsyncIteration
-        if isinstance(item, dict):
-            return aiohttp.WSMessage(
-                aiohttp.WSMsgType.TEXT, json.dumps(item), None
-            )
-        return item
+        while True:
+            try:
+                item = next(self._it)
+            except StopIteration:
+                raise StopAsyncIteration
+            # A scripted asyncio.Event holds the receive loop open until the
+            # test releases it — lets pool tests keep a warm conn "alive"
+            # without inventing server frames.
+            if isinstance(item, asyncio.Event):
+                await item.wait()
+                continue
+            if isinstance(item, dict):
+                return aiohttp.WSMessage(
+                    aiohttp.WSMsgType.TEXT, json.dumps(item), None
+                )
+            return item
 
 
 class _FakeWSConnect:
@@ -77,11 +96,15 @@ class _FakeWSConnect:
 
     def __await__(self):
         async def _go() -> _FakeSonioxWebsocket:
+            if self._ws.connect_gate is not None:
+                await self._ws.connect_gate.wait()
             return self._ws
 
         return _go().__await__()
 
     async def __aenter__(self) -> _FakeSonioxWebsocket:
+        if self._ws.connect_gate is not None:
+            await self._ws.connect_gate.wait()
         return self._ws
 
     async def __aexit__(self, *exc):
@@ -100,19 +123,29 @@ def mock_soniox_ws(monkeypatch) -> object:
     """
 
     registered: list[_FakeSonioxWebsocket] = []
+    by_url: dict[str, _FakeSonioxWebsocket] = {}
 
     class _ScriptFactory:
         @property
         def connections(self) -> list[_FakeSonioxWebsocket]:
             return registered
 
-        def __call__(self, incoming=None) -> _FakeSonioxWebsocket:
-            ws = _FakeSonioxWebsocket(incoming or [])
+        def __call__(
+            self, incoming=None, url=None, connect_gate=None
+        ) -> _FakeSonioxWebsocket:
+            # Issue #8: URL-keyed scripts let a test script the STT and the
+            # TTS (warm) websockets separately on one config entry. A plain
+            # registration keeps the legacy single-script behaviour.
+            ws = _FakeSonioxWebsocket(incoming or [], connect_gate=connect_gate)
             registered.append(ws)
+            if url is not None:
+                by_url[url] = ws
             return ws
 
     def fake_ws_connect(self, url, **kwargs) -> _FakeWSConnect:
-        ws = registered[-1] if registered else _FakeSonioxWebsocket([])
+        ws = by_url.get(url)
+        if ws is None:
+            ws = registered[-1] if registered else _FakeSonioxWebsocket([])
         ws.url = url
         ws.kwargs = kwargs
         return _FakeWSConnect(ws)

@@ -27,6 +27,7 @@ from .const import (
     SonioxEndpoints,
     endpoints_for_region,
 )
+from .pool import SonioxTTSPool
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -51,6 +52,9 @@ class SonioxRuntimeData:
 
     endpoints: SonioxEndpoints
     catalog: SonioxCatalog
+    # Issue #8: warm TTS WebSocket pool — opened from STT start, reused by
+    # TTS requests, torn down on entry unload.
+    tts_pool: SonioxTTSPool
 
 
 type SonioxConfigEntry = ConfigEntry[SonioxRuntimeData]
@@ -66,9 +70,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: SonioxConfigEntry) -> bo
         endpoints,
         entry.data[CONF_API_KEY],
     )
-    entry.runtime_data = SonioxRuntimeData(endpoints=endpoints, catalog=catalog)
+    entry.runtime_data = SonioxRuntimeData(
+        endpoints=endpoints,
+        catalog=catalog,
+        # tts_ws_url is passed in (not read from runtime_data): the pool must
+        # survive entry.runtime_data being deleted on unload (issue #8 AC6).
+        tts_pool=SonioxTTSPool(hass, entry, endpoints.tts_websocket_url),
+    )
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
+    # Issue #8: unload must cancel every pool task and close every socket so
+    # no keepalive/recv task or WebSocket leaks past config-entry teardown.
+    entry.async_on_unload(entry.runtime_data.tts_pool.async_shutdown)
     return True
 
 

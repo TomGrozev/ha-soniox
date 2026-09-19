@@ -133,6 +133,13 @@ class SonioxSTTEntity(SpeechToTextEntity):
         self, metadata: SpeechMetadata, stream: AsyncIterable[bytes]
     ) -> SpeechResult:
         """Dispatch to the realtime WebSocket or the async file API."""
+        # Issue #8: STT start is a strong signal a TTS reply is coming — open
+        # the TTS websocket speculatively so the response stream reuses it.
+        # Warming is fire-and-forget and must never delay or fail STT.
+        try:
+            self._entry.runtime_data.tts_pool.async_warm()
+        except Exception as err:  # noqa: BLE001 — warming must not break STT
+            _LOGGER.debug("Soniox TTS warm-up could not be started: %s", err)
         model = self._selected_model()
         if self._mode == "async" or is_async_stt_model(model):
             return await self._process_async(metadata, stream, model)

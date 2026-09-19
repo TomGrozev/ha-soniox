@@ -2,11 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
-import base64
-import json
 import logging
-import uuid
 from collections.abc import AsyncGenerator
 from typing import Any
 
@@ -279,8 +275,28 @@ class SonioxTTSEntity(TextToSpeechEntity):
     async def _stream_audio(
         self, request: TTSAudioRequest, audio_format: str
     ) -> AsyncGenerator[bytes]:
-        """Drive the Soniox TTS WebSocket and yield decoded audio chunks."""
-        session = async_get_clientsession(self.hass)
+        """Stream through the entry's warm TTS pool (issue #8).
+
+        All WebSocket protocol work (dial, per-stream config, text pump, frame
+        demux, keepalive) now lives in ``pool.SonioxTTSPool``; this entity only
+        resolves the per-stream options. Connection failures keep today's
+        wording so assist pipelines surface the same error as before.
+        """
+        try:
+            async for chunk in self._entry.runtime_data.tts_pool.stream(
+                options=self._stream_options(request, audio_format),
+                message_gen=request.message_gen,
+            ):
+                yield chunk
+        except aiohttp.ClientError as err:
+            raise HomeAssistantError(
+                f"Soniox TTS streaming connection failed: {err}"
+            ) from err
+
+    def _stream_options(
+        self, request: TTSAudioRequest, audio_format: str
+    ) -> dict[str, Any]:
+        """Resolve the per-stream config for a streaming request."""
         api_key: str = self._entry.data[CONF_API_KEY]
         model = self._entry.options.get(CONF_TTS_MODEL, DEFAULT_TTS_MODEL)
         voice = request.options.get(
@@ -288,73 +304,15 @@ class SonioxTTSEntity(TextToSpeechEntity):
             self._entry.options.get(CONF_TTS_VOICE, DEFAULT_TTS_VOICE),
         )
         language = (request.language or self.default_language).split("-", 1)[0].lower()
-        sample_rate = self._resolve_sample_rate(request.options)
-        stream_id = uuid.uuid4().hex
-
-        try:
-            async with session.ws_connect(
-                self._entry.runtime_data.endpoints.tts_websocket_url,
-                heartbeat=30,
-                max_msg_size=0,
-            ) as ws:
-                config: dict[str, Any] = {
-                    "api_key": api_key,
-                    "model": model,
-                    "language": language,
-                    "voice": voice,
-                    "audio_format": audio_format,
-                    "stream_id": stream_id,
-                }
-                if audio_format.startswith("pcm") or audio_format == "wav":
-                    config["sample_rate"] = sample_rate
-                if (speed := self._resolve_speed(request.options)) is not None:
-                    config["speed"] = speed
-                await ws.send_json(config)
-
-                async def pump_text() -> None:
-                    async for chunk in request.message_gen:
-                        if chunk:
-                            await ws.send_json(
-                                {
-                                    "text": chunk,
-                                    "text_end": False,
-                                    "stream_id": stream_id,
-                                }
-                            )
-                    await ws.send_json(
-                        {"text": "", "text_end": True, "stream_id": stream_id}
-                    )
-
-                pump_task = asyncio.create_task(pump_text())
-                try:
-                    async for msg in ws:
-                        if msg.type == aiohttp.WSMsgType.TEXT:
-                            payload = json.loads(msg.data)
-                            if err := payload.get("error_code"):
-                                _LOGGER.error(
-                                    "Soniox TTS error %s: %s",
-                                    err,
-                                    payload.get("error_message"),
-                                )
-                                break
-                            if payload.get("stream_id") not in (None, stream_id):
-                                continue
-                            if audio_b64 := payload.get("audio"):
-                                yield base64.b64decode(audio_b64)
-                            if payload.get("terminated") or payload.get("audio_end"):
-                                break
-                        elif msg.type in (
-                            aiohttp.WSMsgType.CLOSED,
-                            aiohttp.WSMsgType.ERROR,
-                        ):
-                            break
-                finally:
-                    pump_task.cancel()
-                    try:
-                        await pump_task
-                    except (asyncio.CancelledError, Exception) as err:  # noqa: BLE001
-                        _LOGGER.debug("Soniox TTS stream pump cancelled: %s", err)
-        except aiohttp.ClientError as err:
-            raise HomeAssistantError(
-                f"Soniox TTS streaming connection failed: {err}"
-            ) from err
+        options: dict[str, Any] = {
+            "api_key": api_key,
+            "model": model,
+            "language": language,
+            "voice": voice,
+            "audio_format": audio_format,
+        }
+        if audio_format.startswith("pcm") or audio_format == "wav":
+            options["sample_rate"] = self._resolve_sample_rate(request.options)
+        if (speed := self._resolve_speed(request.options)) is not None:
+            options["speed"] = speed
+        return options
