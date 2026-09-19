@@ -58,11 +58,24 @@ _EXTENSION_BY_FORMAT = {
     "mp3": "mp3",
     "wav": "wav",
     "pcm_s16le": "pcm",
+    "flac": "flac",
+    "aac": "aac",
 }
 
-# Assist satellites can start playback as soon as the first PCM/WAV chunk
-# arrives. MP3 needs a complete frame sequence and is buffered as a file.
-_STREAMABLE_FORMATS = {"wav", "pcm_s16le"}
+# _STREAMABLE_FORMATS revisits #6's wav-preferring bias (issue #7): wav
+# guarantees an instant first PCM chunk (progressive playback), but it also
+# guarantees an HA-side ffmpeg transcode whenever the consumer prefers
+# flac/mp3/aac — HA converts whenever its requested extension differs from
+# the engine's (extension != final_extension in tts/__init__.py). For the
+# common case the consumer downloads the finished file (stream_response
+# false) progressive first-chunk playback never happens and the transcode
+# is pure added latency (subprocess spawn + untuned -probesize in HA core).
+# So pass the consumer's preferred format straight through when Soniox can
+# produce it, and keep wav only as the fallback for formats Soniox cannot
+# stream (e.g. ogg/opus containers). The wav tradeoff still exists for
+# playback-while-downloading consumers on constrained devices. Soniox
+# emits mp3, flac, aac, pcm (s16le) and wav natively over the WebSocket.
+_STREAMABLE_FORMATS = {"mp3", "wav", "flac", "aac", "pcm_s16le"}
 _STREAM_DEFAULT_FORMAT = "wav"
 
 
@@ -171,15 +184,19 @@ class SonioxTTSEntity(TextToSpeechEntity):
         return TTSAudioResponse(extension=extension, data_gen=data_gen)
 
     def _resolve_stream_format(self, options: dict[str, Any]) -> str:
-        """Pick a chunk-friendly format so Assist can play audio immediately.
+        """Request the consumer's preferred format when Soniox makes it natively.
 
-        The streaming path always prefers a chunk-friendly format; the saved
-        mp3 default is irrelevant here. Use wav/pcm unless the request asks
-        for another streamable format.
+        HA's tts manager skips its ffmpeg conversion exactly when the format we
+        stream back matches the consumer's requested extension, so a native
+        match (flac satellite, mp3 tts.speak) avoids the transcode entirely.
+        Only formats Soniox cannot produce over the WebSocket fall back to wav
+        (see _STREAMABLE_FORMATS for the progressive-playback tradeoff).
         """
         preferred = options.get(ATTR_PREFERRED_FORMAT)
-        if preferred == "pcm" or preferred in _STREAMABLE_FORMATS:
-            return "wav" if preferred == "pcm" else preferred
+        if preferred == "pcm":
+            preferred = "pcm_s16le"
+        if isinstance(preferred, str) and preferred in _STREAMABLE_FORMATS:
+            return preferred
         return _STREAM_DEFAULT_FORMAT
 
     def _resolve_request_format(self, options: dict[str, Any]) -> str:

@@ -150,6 +150,29 @@ async def test_entry_default_speed_survives_assist_merge(
     assert config["speed"] == 0.8
 
 
+async def test_flac_satellite_gets_native_flac_no_transcode(
+    hass, aioclient_mock, mock_soniox_ws
+):
+    """A flac-negotiating consumer (HA Voice PE) gets Soniox-native flac.
+
+    Driven through HA's public tts API: the WS config must request flac and
+    the stream token HA emits must be flac too. Equal extension on both sides
+    is HA's exact no-ffmpeg condition (extension == final_extension).
+    """
+    await _load_entry(hass, aioclient_mock)
+
+    config = await _drive_assist(
+        hass,
+        mock_soniox_ws,
+        options={ATTR_VOICE: "Maya", ATTR_PREFERRED_FORMAT: "flac"},
+    )
+    assert config["audio_format"] == "flac"
+
+    token = hass.data[DATA_TTS_MANAGER].token_to_stream
+    (stream_token, result_stream), = token.items()
+    assert result_stream.extension == "flac"
+
+
 async def test_per_request_speed_overrides_default_via_assist(
     hass, aioclient_mock, mock_soniox_ws
 ):

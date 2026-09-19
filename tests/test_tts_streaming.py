@@ -1,9 +1,16 @@
 """Tests for Soniox TTS codec streaming (audio format + WS text frames).
 
 Issue #6 acceptance criteria: the codec travels on ATTR_PREFERRED_FORMAT
-with CONF_TTS_AUDIO_FORMAT as the saved options-flow default; the streaming
-path stays WAV-preferring; REST file output stays mp3; no outgoing message
-ever carries HA's internal ``audio_output`` option.
+with CONF_TTS_AUDIO_FORMAT as the saved options-flow default; REST file
+output stays mp3; no outgoing message ever carries HA's internal
+``audio_output`` option.
+
+Issue #7 acceptance criteria: the streaming path requests the consumer's
+preferred format whenever Soniox produces it natively (flac, mp3, aac, pcm,
+wav) — only formats Soniox cannot stream fall back to wav — so HA's tts
+component sees ``extension == final_extension`` and skips its ffmpeg
+transcode. ``pcm`` still normalizes to ``pcm_s16le`` (a real Soniox
+format), keeping a flac-negotiating satellite (HA Voice PE) transcoding-free.
 """
 
 from __future__ import annotations
@@ -185,22 +192,38 @@ async def test_stream_config_has_no_audio_output(
     assert "audio_output" not in config
 
 
-async def test_stream_prefers_wav_over_saved_mp3(
+async def test_stream_passes_consumer_flac_through(
     hass, aioclient_mock, mock_soniox_ws
 ):
-    """Streaming stays WAV even when the saved default is mp3."""
-    entity = await _load_entity(
-        hass, aioclient_mock, options={CONF_TTS_AUDIO_FORMAT: "mp3"}
+    """'flac' (HA Voice PE) is requested natively; no transcode on HA's side."""
+    entity = await _load_entity(hass, aioclient_mock)
+    config, _ = await _stream(
+        entity,
+        mock_soniox_ws,
+        [{"terminated": True}],
+        options={ATTR_PREFERRED_FORMAT: "flac"},
     )
-    config, _ = await _stream(entity, mock_soniox_ws, [{"terminated": True}])
-    assert config["audio_format"] == "wav"
-    assert config["sample_rate"] == 24000
+    assert config["audio_format"] == "flac"
 
 
-async def test_stream_prefers_wav_normalizes_pcm(
+async def test_stream_passes_consumer_mp3_through(
     hass, aioclient_mock, mock_soniox_ws
 ):
-    """ATTR_PREFERRED_FORMAT 'pcm' normalizes to 'wav' on the stream path."""
+    """'mp3' (bare tts.speak default) is requested natively."""
+    entity = await _load_entity(hass, aioclient_mock)
+    config, _ = await _stream(
+        entity,
+        mock_soniox_ws,
+        [{"terminated": True}],
+        options={ATTR_PREFERRED_FORMAT: "mp3"},
+    )
+    assert config["audio_format"] == "mp3"
+
+
+async def test_stream_normalizes_pcm_to_pcm_s16le(
+    hass, aioclient_mock, mock_soniox_ws
+):
+    """ATTR_PREFERRED_FORMAT 'pcm' maps to Soniox's real 'pcm_s16le' name."""
     entity = await _load_entity(hass, aioclient_mock)
     config, _ = await _stream(
         entity,
@@ -208,7 +231,7 @@ async def test_stream_prefers_wav_normalizes_pcm(
         [{"terminated": True}],
         options={ATTR_PREFERRED_FORMAT: "pcm"},
     )
-    assert config["audio_format"] == "wav"
+    assert config["audio_format"] == "pcm_s16le"
 
 
 async def test_stream_keeps_pcm_s16le(hass, aioclient_mock, mock_soniox_ws):
@@ -221,6 +244,52 @@ async def test_stream_keeps_pcm_s16le(hass, aioclient_mock, mock_soniox_ws):
         options={ATTR_PREFERRED_FORMAT: "pcm_s16le"},
     )
     assert config["audio_format"] == "pcm_s16le"
+
+
+async def test_stream_response_extension_matches_received_format(
+    hass, aioclient_mock, mock_soniox_ws
+):
+    """TTSAudioResponse.extension equals the requested format.
+
+    HA tts converts only when final_extension != extension, so this equality
+    is exactly the 'no ffmpeg conversion' clause for native formats.
+    """
+    entity = await _load_entity(hass, aioclient_mock)
+    ws = mock_soniox_ws([{"terminated": True}])
+
+    async def _send_json(data, **_: object):
+        ws.sent.append(data)
+
+    ws.send_json = _send_json
+
+    async def _gen():
+        yield "hello"
+
+    response = await entity.async_stream_tts_audio(
+        TTSAudioRequest(
+            language="en",
+            options={ATTR_PREFERRED_FORMAT: "flac"},
+            message_gen=_gen(),
+        )
+    )
+    async for _ in response.data_gen:
+        await asyncio.sleep(0)
+    assert response.extension == "flac"
+
+
+async def test_stream_unknown_format_falls_back_to_wav(
+    hass, aioclient_mock, mock_soniox_ws
+):
+    """A format Soniox does not produce natively falls back to wav."""
+    entity = await _load_entity(hass, aioclient_mock)
+    config, _ = await _stream(
+        entity,
+        mock_soniox_ws,
+        [{"terminated": True}],
+        options={ATTR_PREFERRED_FORMAT: "ogg"},
+    )
+    assert config["audio_format"] == "wav"
+    assert config["sample_rate"] == 24000
 
 
 async def test_entity_declares_streaming_support(hass, aioclient_mock):
