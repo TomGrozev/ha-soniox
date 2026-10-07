@@ -25,6 +25,7 @@ import asyncio
 import base64
 import json
 import logging
+import time
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterable
 from dataclasses import dataclass, field
@@ -304,10 +305,24 @@ class SonioxTTSPool:
         after its stream. A warm-up still in flight is never awaited: the
         request dials its own borrowed conn instead (issue #8 AC2b).
         """
+        started = time.monotonic()
         conn = await self._claim()
         stream_id = uuid.uuid4().hex
         stream = _Stream(stream_id)
         conn._streams[stream_id] = stream
+        warm = conn.warm
+        first_text_at: float | None = None
+
+        async def _timed_text() -> AsyncGenerator[str]:
+            # Streaming LLM pipelines open the TTS stream (at the tool call)
+            # long before any speakable text exists, so first-audio latency is
+            # only meaningful measured from the first text chunk.
+            nonlocal first_text_at
+            async for chunk in message_gen:
+                if chunk and first_text_at is None:
+                    first_text_at = time.monotonic()
+                yield chunk
+
         try:
             await conn.send_json({**options, "stream_id": stream_id})
         except Exception as err:  # noqa: BLE001 — dead socket at config time
@@ -317,7 +332,8 @@ class SonioxTTSPool:
                 f"Soniox TTS streaming connection failed: {err}"
             ) from err
 
-        pump_task = asyncio.create_task(conn.pump_text(stream_id, message_gen))
+        pump_task = asyncio.create_task(conn.pump_text(stream_id, _timed_text()))
+        first_chunk = True
         try:
             while True:
                 item = await stream.queue.get()
@@ -325,6 +341,16 @@ class SonioxTTSPool:
                     if stream.error is not None:
                         raise HomeAssistantError(stream.error)
                     return
+                if first_chunk:
+                    now = time.monotonic()
+                    _LOGGER.debug(
+                        "Soniox TTS first audio frame %.0f ms after request, "
+                        "%.0f ms after first text (%s connection)",
+                        (now - started) * 1000,
+                        (now - (first_text_at or started)) * 1000,
+                        "warm" if warm else "cold",
+                    )
+                    first_chunk = False
                 yield item
         finally:
             if not pump_task.done():
