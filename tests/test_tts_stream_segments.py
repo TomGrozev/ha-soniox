@@ -1,11 +1,11 @@
 """Streaming TTS across Soniox stream retirements (issue #8 follow-up).
 
 An LLM pipeline opens the TTS request before any speakable text exists and can
-pause for seconds (a tool call). Soniox retires a stream that gets no text for
-a few seconds and has no per-stream keepalive, so the pool closes a segment
-that has text cleanly after ``STREAM_IDLE_CLOSE`` and opens a fresh stream for
-the next text — every segment's audio joined into the one byte stream HA asked
-for. A stream Soniox retires under us (a 408) must not fail the request: any
+pause for seconds (a tool call). Soniox retires a stream left without text for
+a few seconds (a 408 / request_timeout) and has no per-stream keepalive; the
+pool keeps no timer of its own — that retirement is the signal to open a fresh
+stream for the next text, every segment's audio joined into the one byte stream
+HA asked for. A stream Soniox retires under us must not fail the request: any
 text that never reached synthesis is replayed on the next stream, and a later
 400 for the retired stream is ignored.
 
@@ -28,7 +28,6 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import DATA_ENTITY_PLATFORM
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.soniox import pool as soniox_pool
 from custom_components.soniox.const import (
     CONF_API_KEY,
     CONF_REGION,
@@ -100,7 +99,7 @@ def _texts(ws) -> list:
 
 
 def _text_ends(ws) -> list:
-    """text_end frames (our idle close or the end-of-message finalize)."""
+    """text_end frames (the end-of-message finalize or a replay)."""
     return [s for s in ws.sent if isinstance(s, dict) and s.get("text_end")]
 
 
@@ -168,23 +167,32 @@ def _sid_for_text(ws, index: int) -> str:
     return _texts(ws)[index]["stream_id"]
 
 
-# -- idle close and reopen -----------------------------------------------
+# -- pause, retirement, and reopen ---------------------------------------
 
 
-async def test_idle_gap_closes_segment_and_reopens_same_conn(
-    hass, aioclient_mock, mock_soniox_ws, monkeypatch
+async def test_pause_retires_segment_and_reopens_same_conn(
+    hass, aioclient_mock, mock_soniox_ws
 ):
-    """A pause after text ends stream A; the next text opens stream B."""
-    monkeypatch.setattr(soniox_pool, "STREAM_IDLE_CLOSE", 0.05)
+    """A pause after text retires stream A; the next text opens stream B."""
     entry, tts = await _setup_entry(hass, aioclient_mock)
     gen = _ScriptedGen()
+    retired = asyncio.Event()
 
     async def _a_audio(ws):
         await _wait_for(lambda: _texts(ws))
         return {"audio": _b64(b"AAA"), "stream_id": _sid_for_text(ws, 0)}
 
-    async def _a_end(ws):
-        await _wait_for(lambda: _text_ends(ws))
+    async def _a_retire(ws):
+        return {
+            "stream_id": _sid_for_text(ws, 0),
+            "error_code": 408,
+            "error_type": "request_timeout",
+            "error_message": "request timeout",
+        }
+
+    async def _a_term(ws):
+        # Only reached after the 408 above was dispatched, so A is retired.
+        retired.set()
         return {"terminated": True, "stream_id": _sid_for_text(ws, 0)}
 
     async def _b_audio(ws):
@@ -192,14 +200,17 @@ async def test_idle_gap_closes_segment_and_reopens_same_conn(
         return {"audio": _b64(b"BBB"), "stream_id": _sid_for_text(ws, 1)}
 
     async def _b_end(ws):
-        await _wait_for(lambda: len(_text_ends(ws)) >= 2)
+        await _wait_for(lambda: _text_ends(ws))
         return {"terminated": True, "stream_id": _sid_for_text(ws, 1)}
 
-    ws = mock_soniox_ws([_a_audio, _a_end, _b_audio, _b_end], url=_TTS_URL)
+    ws = mock_soniox_ws(
+        [_a_audio, _a_retire, _a_term, _b_audio, _b_end], url=_TTS_URL
+    )
 
     task = asyncio.create_task(_collect(tts, gen, _pcm()))
     gen.push("Hello")
-    await _wait_for(lambda: _text_ends(ws))  # idle close on stream A
+    # The next text must arrive only after A retired, else it would go to A.
+    await retired.wait()
     gen.push("World")
     gen.close()
     chunks = await task
@@ -210,17 +221,15 @@ async def test_idle_gap_closes_segment_and_reopens_same_conn(
     configs = _configs(ws)
     assert len(configs) == 2
     assert configs[0]["stream_id"] != configs[1]["stream_id"]
-    # text_end went to A; the second text went to the fresh stream B.
-    assert _text_ends(ws)[0]["stream_id"] == configs[0]["stream_id"]
+    # The second text went to the fresh stream B.
     assert _texts(ws)[1]["stream_id"] == configs[1]["stream_id"]
     await _unload(hass, entry)
 
 
-async def test_preemptive_segment_with_no_text_is_never_idle_closed(
-    hass, aioclient_mock, mock_soniox_ws, monkeypatch
+async def test_segment_with_text_stays_open_through_pause(
+    hass, aioclient_mock, mock_soniox_ws
 ):
-    """The segment opened before any text is not closed for lack of text."""
-    monkeypatch.setattr(soniox_pool, "STREAM_IDLE_CLOSE", 0.05)
+    """A stream with text is not closed for lack of text before message_gen ends."""
     entry, tts = await _setup_entry(hass, aioclient_mock)
     gen = _ScriptedGen()
 
@@ -231,15 +240,16 @@ async def test_preemptive_segment_with_no_text_is_never_idle_closed(
     ws = mock_soniox_ws([_end_after_text_end], url=_TTS_URL)
 
     task = asyncio.create_task(_collect(tts, gen, _pcm()))
-    await _wait_for(lambda: _configs(ws))
-    await asyncio.sleep(0.2)  # several idle windows with no text
+    gen.push("Hello")
+    await _wait_for(lambda: _texts(ws))
+    await asyncio.sleep(0.2)  # a long pause with text on the open stream
     assert _text_ends(ws) == []
 
     gen.close()
     chunks = await task
 
     assert chunks == []
-    # Only the end-of-message text_end, never an idle close.
+    # Only the end-of-message text_end, never a client-side close.
     assert len(_text_ends(ws)) == 1
     await _unload(hass, entry)
 
@@ -338,105 +348,50 @@ async def test_retired_text_is_replayed_and_stray_400_ignored(
     await _unload(hass, entry)
 
 
-# -- output ordering -----------------------------------------------------
-
-
-async def test_later_segment_audio_held_until_earlier_drains(
-    hass, aioclient_mock, mock_soniox_ws, monkeypatch
-):
-    """B's audio is queued before A ends but yielded only after A drains."""
-    # 0.2s idle: long enough that B (opened by the second push) is still well
-    # inside its own idle window when the generator is checked below.
-    monkeypatch.setattr(soniox_pool, "STREAM_IDLE_CLOSE", 0.2)
-    entry, tts = await _setup_entry(hass, aioclient_mock)
-    gen = _ScriptedGen()
-
-    # A's bytes are a truncated RIFF header, so the joiner buffers them until
-    # A's end_segment; B's headerless continuation flushes straight through.
-    async def _a_audio(ws):
-        await _wait_for(lambda: _texts(ws))
-        return {"audio": _b64(b"RIFF"), "stream_id": _sid_for_text(ws, 0)}
-
-    async def _b_audio(ws):
-        await _wait_for(lambda: len(_texts(ws)) >= 2)
-        return {"audio": _b64(b"BBB"), "stream_id": _sid_for_text(ws, 1)}
-
-    async def _a_end(ws):
-        # Only after B's end-of-message text_end, so A is still open while the
-        # generator is checked below.
-        await _wait_for(lambda: len(_text_ends(ws)) >= 2)
-        return {"terminated": True, "stream_id": _sid_for_text(ws, 0)}
-
-    async def _b_end(ws):
-        return {"terminated": True, "stream_id": _sid_for_text(ws, 1)}
-
-    ws = mock_soniox_ws([_a_audio, _b_audio, _a_end, _b_end], url=_TTS_URL)
-    options = {ATTR_PREFERRED_FORMAT: "wav"}
-
-    agen = await _stream_gen(tts, gen, options)
-    out: asyncio.Queue[bytes | None] = asyncio.Queue()
-
-    async def _drain() -> None:
-        async for chunk in agen:
-            out.put_nowait(chunk)
-        out.put_nowait(None)
-
-    drain = asyncio.create_task(_drain())
-    gen.push("Hello")
-    await _wait_for(lambda: _text_ends(ws))  # A idle-closed
-    gen.push("World")
-    await _wait_for(lambda: len(_texts(ws)) >= 2)  # B open, B audio queued
-
-    await asyncio.sleep(0.05)
-    assert out.empty(), "B's audio leaked before A drained"
-
-    gen.close()  # end-of-message text_end on B → A and B terminate
-    await drain
-    chunks = []
-    while not out.empty():
-        chunk = out.get_nowait()
-        if chunk is None:
-            break
-        chunks.append(chunk)
-
-    assert chunks == [b"RIFF", b"BBB"]
-    await _unload(hass, entry)
-
-
 # -- connection lifetime -------------------------------------------------
 
 
 async def test_borrowed_conn_survives_segments_and_closes_at_end(
-    hass, aioclient_mock, mock_soniox_ws, monkeypatch
+    hass, aioclient_mock, mock_soniox_ws
 ):
     """A borrowed conn spans both segments and closes only at request end."""
-    monkeypatch.setattr(soniox_pool, "STREAM_IDLE_CLOSE", 0.05)
     entry, tts = await _setup_entry(hass, aioclient_mock)
     gen = _ScriptedGen()
+    retired = asyncio.Event()
 
     async def _a_audio(ws):
         await _wait_for(lambda: _texts(ws))
         return {"audio": _b64(b"AAA"), "stream_id": _sid_for_text(ws, 0)}
 
+    async def _a_retire(ws):
+        return {
+            "stream_id": _sid_for_text(ws, 0),
+            "error_code": 408,
+            "error_type": "request_timeout",
+            "error_message": "request timeout",
+        }
+
+    async def _a_term(ws):
+        retired.set()
+        return {"terminated": True, "stream_id": _sid_for_text(ws, 0)}
+
     async def _b_audio(ws):
         await _wait_for(lambda: len(_texts(ws)) >= 2)
         return {"audio": _b64(b"BBB"), "stream_id": _sid_for_text(ws, 1)}
 
-    async def _a_end(ws):
-        await _wait_for(lambda: _text_ends(ws))
-        return {"terminated": True, "stream_id": _sid_for_text(ws, 0)}
-
     async def _b_end(ws):
-        await _wait_for(lambda: len(_text_ends(ws)) >= 2)
+        await _wait_for(lambda: _text_ends(ws))
         return {"terminated": True, "stream_id": _sid_for_text(ws, 1)}
 
-    ws = mock_soniox_ws([_a_audio, _b_audio, _a_end, _b_end], url=_TTS_URL)
+    ws = mock_soniox_ws(
+        [_a_audio, _a_retire, _a_term, _b_audio, _b_end], url=_TTS_URL
+    )
 
     task = asyncio.create_task(_collect(tts, gen, _pcm()))
     gen.push("Hello")
-    await _wait_for(lambda: _text_ends(ws))
+    await retired.wait()
     gen.push("World")
-    await _wait_for(lambda: len(_configs(ws)) >= 2)
+    await _wait_for(lambda: len(_configs(ws)) >= 2)  # B open on the same conn
     assert ws.closed is False  # not torn down between segments
 
     gen.close()
@@ -449,33 +404,43 @@ async def test_borrowed_conn_survives_segments_and_closes_at_end(
 
 
 async def test_warm_conn_survives_segments(
-    hass, aioclient_mock, mock_soniox_ws, monkeypatch
+    hass, aioclient_mock, mock_soniox_ws
 ):
     """A warm conn carries both segments and stays warm after the request."""
-    monkeypatch.setattr(soniox_pool, "STREAM_IDLE_CLOSE", 0.05)
     entry, tts = await _setup_entry(hass, aioclient_mock)
     gen = _ScriptedGen()
+    retired = asyncio.Event()
 
     async def _a_audio(ws):
         await _wait_for(lambda: _texts(ws))
         return {"audio": _b64(b"AAA"), "stream_id": _sid_for_text(ws, 0)}
 
+    async def _a_retire(ws):
+        return {
+            "stream_id": _sid_for_text(ws, 0),
+            "error_code": 408,
+            "error_type": "request_timeout",
+            "error_message": "request timeout",
+        }
+
+    async def _a_term(ws):
+        retired.set()
+        return {"terminated": True, "stream_id": _sid_for_text(ws, 0)}
+
     async def _b_audio(ws):
         await _wait_for(lambda: len(_texts(ws)) >= 2)
         return {"audio": _b64(b"BBB"), "stream_id": _sid_for_text(ws, 1)}
 
-    async def _a_end(ws):
-        await _wait_for(lambda: _text_ends(ws))
-        return {"terminated": True, "stream_id": _sid_for_text(ws, 0)}
-
     async def _b_end(ws):
-        await _wait_for(lambda: len(_text_ends(ws)) >= 2)
+        await _wait_for(lambda: _text_ends(ws))
         return {"terminated": True, "stream_id": _sid_for_text(ws, 1)}
 
     # The trailing never-set gate keeps the fake recv loop open after the last
     # frame, so the conn is only closed by the pool (unload), not by script EOF.
     hold = asyncio.Event()
-    ws = mock_soniox_ws([_a_audio, _b_audio, _a_end, _b_end, hold], url=_TTS_URL)
+    ws = mock_soniox_ws(
+        [_a_audio, _a_retire, _a_term, _b_audio, _b_end, hold], url=_TTS_URL
+    )
 
     entry.runtime_data.tts_pool.async_warm()
     await _wait_for(lambda: _configs(ws))  # the warm-up config
@@ -483,7 +448,7 @@ async def test_warm_conn_survives_segments(
 
     task = asyncio.create_task(_collect(tts, gen, _pcm()))
     gen.push("Hello")
-    await _wait_for(lambda: _text_ends(ws))
+    await retired.wait()
     gen.push("World")
     # configs = warm-up, A, B
     await _wait_for(lambda: len(_configs(ws)) >= 3)

@@ -70,15 +70,6 @@ KEEPALIVE_INTERVAL = 25
 # (https://soniox.com/docs/tts/rt/streams).
 MAX_STREAMS_PER_CONN = 5
 
-# Seconds of text silence on a stream that has already received text before we
-# end it cleanly. Soniox retires a stream that gets no text for "a few seconds"
-# (undocumented; observed ~5–18 s) and offers NO per-stream keepalive; its
-# documented remedy is to send text_end and open a new stream
-# (https://soniox.com/docs/tts/rt/connection-keepalive). Closing at 3 s — well
-# inside that window — lets an LLM pipeline pause (e.g. a tool call) without the
-# stream dying mid-synthesis under our feet.
-STREAM_IDLE_CLOSE = 3.0
-
 
 @dataclass
 class _Stream:
@@ -128,10 +119,11 @@ class _Segment:
     def closed_for_text(self) -> bool:
         """True when no further text may go to this stream.
 
-        Only an explicit end closes a segment to more text: our own idle close
-        (``text_end_sent``), a Soniox 408 retirement, or a dead connection. A
-        bare ``terminated`` frame does not — Soniox never ends a stream we have
-        not text_end'ed without first reporting a 408.
+        Only an explicit end closes a segment to more text: our own text_end
+        (``text_end_sent``, sent by the end-of-message finalize or when
+        replaying a retired segment's text), a Soniox 408 retirement, or a dead
+        connection. A bare ``terminated`` frame does not — Soniox never ends a
+        stream we have not text_end'ed without first reporting a 408.
         """
         return (
             self.text_end_sent
@@ -346,11 +338,12 @@ class _RequestSession:
     """Drive one streaming request as a sequence of Soniox streams.
 
     An LLM pipeline opens the TTS request before any speakable text exists and
-    can pause for seconds (e.g. a tool call). Soniox retires a stream that gets
-    no text for a few seconds and has NO per-stream keepalive, so a segment
-    that has received text is closed cleanly after ``STREAM_IDLE_CLOSE`` and
-    the next text opens a fresh stream — every segment's audio joined into the
-    one container byte stream Home Assistant asked for
+    can pause for seconds (e.g. a tool call). Soniox retires a stream left
+    without text for a few seconds (error_code 408 / request_timeout) and
+    offers NO per-stream keepalive; that retirement is itself the signal to
+    open a fresh stream for the next text, so the client keeps no timer of its
+    own — every segment's audio joined into the one container byte stream Home
+    Assistant asked for
     (https://soniox.com/docs/tts/rt/connection-keepalive).
     """
 
@@ -456,9 +449,8 @@ class _RequestSession:
     async def _read_gen(self, message_gen: AsyncIterable[str]) -> None:
         """Forward message_gen's non-empty chunks to the pump; None at EOF.
 
-        Reading in its own task means the pump times out on its own queue and
-        never cancels a pending ``message_gen.__anext__`` (which would close
-        the caller's generator).
+        Reading in its own task means the pump never cancels a pending
+        ``message_gen.__anext__`` (which would close the caller's generator).
         """
         try:
             async for chunk in message_gen:
@@ -496,21 +488,9 @@ class _RequestSession:
                 waiters: list[asyncio.Task[Any]] = [changed_task]
                 if text_task is not None:
                     waiters.append(text_task)
-                # Only a segment that has text and is still open can go idle.
-                current = self._current
-                timeout = (
-                    STREAM_IDLE_CLOSE
-                    if current is not None
-                    and current.sent_text
-                    and not current.closed_for_text
-                    else None
-                )
                 done, _ = await asyncio.wait(
-                    waiters, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
+                    waiters, return_when=asyncio.FIRST_COMPLETED
                 )
-                if not done:
-                    await self._idle_close(current)
-                    continue
                 if changed_task in done:
                     self._changed.clear()
                     changed_task = asyncio.create_task(self._changed.wait())
@@ -623,14 +603,6 @@ class _RequestSession:
                 await self._send_text_end(seg)
         return seg
 
-    async def _idle_close(self, seg: _Segment) -> None:
-        await self._send_text_end(seg)
-        _LOGGER.debug(
-            "Soniox TTS idle-closed stream %s after %.0fs without text",
-            seg.stream.stream_id,
-            STREAM_IDLE_CLOSE,
-        )
-
     async def _finalize(self) -> None:
         """message_gen exhausted: end the open segment (today's behaviour)."""
         seg = self._current
@@ -690,8 +662,8 @@ class SonioxTTSPool:
         Claims an idle warm conn (no re-handshake — one ``ws_connect`` across
         warm + request, issue #8 AC2) or dials a borrowed conn that closes
         after the request. The pre-emptive segment opens immediately (before
-        any text exists); later segments are opened as text resumes after an
-        idle close or a Soniox retirement, all joined into one byte stream.
+        any text exists); later segments are opened as text resumes after a
+        Soniox retirement, all joined into one byte stream.
         """
         started = time.monotonic()
         conn = await self._claim()

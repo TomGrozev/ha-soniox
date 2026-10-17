@@ -20,9 +20,9 @@ provider, ready to plug into the Assist voice pipeline.
 - **TTS** — `tts-rt-v2` voices. Assist uses the Soniox WebSocket so audio
   chunks (WAV/PCM) start playing before the sentence is finished. `tts.speak`
   still uses a one-shot REST call (MP3 by default). When the reply pauses (for
-  example while the assistant runs a tool), the stream is ended after about
-  3 seconds and continues on a new one, so slow replies are not cut off and the
-  audio plays as one response.
+  example while the assistant runs a tool), Soniox ends the stream after a few
+  seconds; the next text continues on a new one, so slow replies are not cut off
+  and the audio plays as one response.
 
 ## Installation
 
