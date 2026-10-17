@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 
 import aiohttp
@@ -22,8 +23,10 @@ class _FakeSonioxWebsocket:
 
     Records JSON-decoded outgoing messages on ``.sent`` (the integration uses
     ``send_json``) and yields scripted incoming messages. A ``dict`` in the
-    script becomes a fake TEXT ``WSMessage`` carrying its JSON; any other item
-    is yielded unchanged so tests can push CLOSED/ERROR-style fakes.
+    script becomes a fake TEXT ``WSMessage`` carrying its JSON; a callable is
+    evaluated lazily against this fake (so a frame can be built from an
+    outgoing message); any other item is yielded unchanged so tests can push
+    CLOSED/ERROR-style fakes.
     """
 
     def __init__(self, incoming, connect_gate=None):
@@ -77,6 +80,15 @@ class _FakeSonioxWebsocket:
             if isinstance(item, asyncio.Event):
                 await item.wait()
                 continue
+            # A callable (sync or async) is evaluated lazily against this fake,
+            # so a test can build a frame from an earlier outgoing message —
+            # e.g. tag audio with the stream_id of the config just sent.
+            if callable(item):
+                item = item(self)
+                if inspect.isawaitable(item):
+                    item = await item
+                if item is None:
+                    continue
             if isinstance(item, dict):
                 return aiohttp.WSMessage(
                     aiohttp.WSMsgType.TEXT, json.dumps(item), None

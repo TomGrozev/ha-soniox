@@ -27,7 +27,7 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import AsyncGenerator, AsyncIterable
+from collections.abc import AsyncGenerator, AsyncIterable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -36,6 +36,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
+from .audio_join import StreamJoiner
 from .const import (
     CONF_API_KEY,
     CONF_TTS_AUDIO_FORMAT,
@@ -79,6 +80,15 @@ class _Stream:
     error: str | None = None
     queue: asyncio.Queue[bytes | None] = field(default_factory=asyncio.Queue)
     finished: bool = False
+    # True once Soniox retired this stream for lack of text (a 408); the request
+    # pump replays any unsynthesized text on a fresh stream.
+    retired: bool = False
+    # True once any audio frame was routed here, so a retired stream's text is
+    # replayed only when it never reached synthesis (else speech would repeat).
+    had_audio: bool = False
+    # Woken when this stream ends (cleanly, by retirement, or by conn failure)
+    # so a request pump notices a retirement even when no new text arrives.
+    on_finish: Callable[[], None] | None = None
 
     def finish(self, error: str | None = None) -> None:
         """Terminate the stream (cleanly or with an error for its consumer)."""
@@ -88,6 +98,38 @@ class _Stream:
         if error is not None:
             self.error = error
         self.queue.put_nowait(None)
+        if self.on_finish is not None:
+            self.on_finish()
+
+
+@dataclass
+class _Segment:
+    """One Soniox stream within a request, plus the pump's send-side state."""
+
+    conn: _TTSConnection
+    stream: _Stream
+    sent_text: list[str] = field(default_factory=list)
+    text_end_sent: bool = False
+    retired_handled: bool = False
+    # True when this segment was opened to carry another segment's replayed
+    # text, so a second retirement of that same text fails instead of looping.
+    replayed: bool = False
+
+    @property
+    def closed_for_text(self) -> bool:
+        """True when no further text may go to this stream.
+
+        Only an explicit end closes a segment to more text: our own text_end
+        (``text_end_sent``, sent by the end-of-message finalize or when
+        replaying a retired segment's text), a Soniox 408 retirement, or a dead
+        connection. A bare ``terminated`` frame does not — Soniox never ends a
+        stream we have not text_end'ed without first reporting a 408.
+        """
+        return (
+            self.text_end_sent
+            or self.stream.retired
+            or self.stream.error is not None
+        )
 
 
 class _TTSConnection:
@@ -118,8 +160,10 @@ class _TTSConnection:
 
     @property
     def active_streams(self) -> int:
-        """Live request streams (excludes the anchor warm-up stream)."""
-        return sum(1 for s in self._streams.values() if not s.warm_up)
+        """Live request streams (excludes the anchor warm-up and finished ones)."""
+        return sum(
+            1 for s in self._streams.values() if not s.warm_up and not s.finished
+        )
 
     def start(self) -> None:
         """Spawn the recv-loop task; the conn lives outside any request scope."""
@@ -144,15 +188,6 @@ class _TTSConnection:
         await self.send_json({**options, "stream_id": stream_id})
         self._keepalive_task = asyncio.create_task(self._run_keepalive())
 
-    async def pump_text(self, stream_id: str, message_gen: AsyncIterable[str]) -> None:
-        """Forward message_gen chunks as Soniox text frames, then signal EOF."""
-        async for chunk in message_gen:
-            if chunk:
-                await self.send_json(
-                    {"text": chunk, "text_end": False, "stream_id": stream_id}
-                )
-        await self.send_json({"text": "", "text_end": True, "stream_id": stream_id})
-
     async def _run_recv(self) -> None:
         """Demux incoming frames by stream_id; tear the conn down when it dies."""
         try:
@@ -174,11 +209,17 @@ class _TTSConnection:
     def _dispatch(self, payload: dict[str, Any]) -> None:
         stream_id = payload.get("stream_id")
         if err_code := payload.get("error_code"):
-            self._on_error_frame(stream_id, err_code, payload.get("error_message"))
+            self._on_error_frame(
+                stream_id,
+                err_code,
+                payload.get("error_message"),
+                payload.get("error_type"),
+            )
             return
         if audio_b64 := payload.get("audio"):
             audio = base64.b64decode(audio_b64)
             for stream in self._targets(stream_id):
+                stream.had_audio = True
                 stream.queue.put_nowait(audio)
         if payload.get("terminated") or payload.get("audio_end"):
             for stream in self._targets(stream_id):
@@ -197,7 +238,11 @@ class _TTSConnection:
         return [stream] if stream is not None and not stream.warm_up else []
 
     def _on_error_frame(
-        self, stream_id: str | None, err_code: int | str, err_message: Any
+        self,
+        stream_id: str | None,
+        err_code: int | str,
+        err_message: Any,
+        err_type: Any = None,
     ) -> None:
         err_msg = err_message or str(err_code)
         stream = self._streams.get(stream_id) if stream_id is not None else None
@@ -208,6 +253,30 @@ class _TTSConnection:
                 "Soniox TTS warm-up stream retired (benign): %s: %s",
                 err_code,
                 err_msg,
+            )
+            return
+        if stream is not None and stream.finished:
+            # A frame for a stream we already ended — e.g. the 400
+            # invalid_stream_state for text that crossed a retirement. Ignore
+            # it and keep the conn up.
+            _LOGGER.debug(
+                "Soniox TTS ignoring error for finished stream %s: %s: %s",
+                stream_id,
+                err_code,
+                err_msg,
+            )
+            return
+        if stream is not None and (
+            str(err_code) == "408" or err_type == "request_timeout"
+        ):
+            # Soniox retired the stream for lack of text (no per-stream
+            # keepalive). End it cleanly for the consumer — the pump opens a
+            # fresh stream for any text that never reached synthesis — and keep
+            # the conn alive (https://soniox.com/docs/tts/rt/connection-keepalive).
+            stream.retired = True
+            stream.finish()
+            _LOGGER.debug(
+                "Soniox TTS request stream %s retired (request timeout)", stream_id
             )
             return
         if stream is not None:
@@ -265,6 +334,296 @@ class _TTSConnection:
                 stream.finish(error=message)
 
 
+class _RequestSession:
+    """Drive one streaming request as a sequence of Soniox streams.
+
+    An LLM pipeline opens the TTS request before any speakable text exists and
+    can pause for seconds (e.g. a tool call). Soniox retires a stream left
+    without text for a few seconds (error_code 408 / request_timeout) and
+    offers NO per-stream keepalive; that retirement is itself the signal to
+    open a fresh stream for the next text, so the client keeps no timer of its
+    own — every segment's audio joined into the one container byte stream Home
+    Assistant asked for
+    (https://soniox.com/docs/tts/rt/connection-keepalive).
+    """
+
+    def __init__(
+        self,
+        pool: SonioxTTSPool,
+        conn: _TTSConnection,
+        options: dict[str, Any],
+        *,
+        started: float,
+    ) -> None:
+        self._pool = pool
+        self._conn = conn
+        self._options = options
+        self._started = started
+        self._warm = conn.warm
+        self._joiner = StreamJoiner(options.get("audio_format", ""))
+        self._output: asyncio.Queue[_Segment | None] = asyncio.Queue()
+        self._text: asyncio.Queue[str | None] = asyncio.Queue()
+        # Set whenever any of this request's streams ends, so the pump notices
+        # a Soniox retirement even when no new text arrives.
+        self._changed = asyncio.Event()
+        self._segments: list[_Segment] = []
+        self._current: _Segment | None = None
+        self._gen_task: asyncio.Task[None] | None = None
+        self._task: asyncio.Task[None] | None = None
+        self._error: BaseException | None = None
+        self._first_text_at: float | None = None
+        self._first_chunk = True
+
+    async def open_first(self) -> None:
+        """Open the pre-emptive segment at request start (config sent now)."""
+        await self._open_segment()
+
+    def start(self, message_gen: AsyncIterable[str]) -> None:
+        """Spawn the text reader and the segment pump."""
+        self._gen_task = asyncio.create_task(self._read_gen(message_gen))
+        self._task = asyncio.create_task(self._manage())
+
+    async def consume(self) -> AsyncGenerator[bytes]:
+        """Yield each segment's audio in open order, joined into one stream."""
+        while True:
+            seg = await self._output.get()
+            if seg is None:
+                if self._error is not None:
+                    raise HomeAssistantError(
+                        f"Soniox TTS streaming connection failed: {self._error}"
+                    ) from self._error
+                return
+            self._joiner.start_segment()
+            while True:
+                item = await seg.stream.queue.get()
+                if item is None:
+                    break
+                data = self._joiner.feed(item)
+                if data:
+                    self._log_first_audio()
+                    yield data
+            tail = self._joiner.end_segment()
+            if tail:
+                self._log_first_audio()
+                yield tail
+            if seg.stream.error is not None:
+                raise HomeAssistantError(seg.stream.error)
+
+    async def aclose(self, *, close_all: bool = False) -> None:
+        """Cancel this request's tasks, pop its streams, close borrowed conns."""
+        for task in (self._task, self._gen_task):
+            if task is not None and not task.done():
+                task.cancel()
+        for task in (self._task, self._gen_task):
+            if task is not None:
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
+        conns = {seg.conn for seg in self._segments}
+        if self._conn is not None:
+            conns.add(self._conn)
+        for seg in self._segments:
+            seg.conn._streams.pop(seg.stream.stream_id, None)
+        # Borrowed conns close only when the whole request ends; a warm conn
+        # stays warm (issue #8). A dead socket at config time is closed too.
+        for conn in conns:
+            if close_all or not conn.warm:
+                await conn.close(reason="stream finished")
+
+    def _log_first_audio(self) -> None:
+        if not self._first_chunk:
+            return
+        self._first_chunk = False
+        now = time.monotonic()
+        _LOGGER.debug(
+            "Soniox TTS first audio frame %.0f ms after request, "
+            "%.0f ms after first text (%s connection)",
+            (now - self._started) * 1000,
+            (now - (self._first_text_at or self._started)) * 1000,
+            "warm" if self._warm else "cold",
+        )
+
+    # -- pump internals --------------------------------------------------
+
+    async def _read_gen(self, message_gen: AsyncIterable[str]) -> None:
+        """Forward message_gen's non-empty chunks to the pump; None at EOF.
+
+        Reading in its own task means the pump never cancels a pending
+        ``message_gen.__anext__`` (which would close the caller's generator).
+        """
+        try:
+            async for chunk in message_gen:
+                if chunk:
+                    # Streaming LLM pipelines open the TTS request long before
+                    # any speakable text exists, so first-audio latency is only
+                    # meaningful measured from the first text chunk.
+                    if self._first_text_at is None:
+                        self._first_text_at = time.monotonic()
+                    await self._text.put(chunk)
+        finally:
+            self._text.put_nowait(None)
+
+    async def _manage(self) -> None:
+        try:
+            await self._run_manage()
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # noqa: BLE001 — surfaced to the consumer below
+            _LOGGER.debug("Soniox TTS request pump failed: %s", err)
+            self._error = err
+        finally:
+            self._output.put_nowait(None)
+
+    async def _run_manage(self) -> None:
+        text_task: asyncio.Task[str | None] | None = asyncio.create_task(
+            self._text.get()
+        )
+        changed_task = asyncio.create_task(self._changed.wait())
+        gen_done = False
+        try:
+            while True:
+                if gen_done and not self._any_unfinished():
+                    return
+                waiters: list[asyncio.Task[Any]] = [changed_task]
+                if text_task is not None:
+                    waiters.append(text_task)
+                done, _ = await asyncio.wait(
+                    waiters, return_when=asyncio.FIRST_COMPLETED
+                )
+                if changed_task in done:
+                    self._changed.clear()
+                    changed_task = asyncio.create_task(self._changed.wait())
+                    await self._on_stream_ended()
+                if text_task is not None and text_task in done:
+                    chunk = text_task.result()
+                    if chunk is None:
+                        gen_done = True
+                        text_task = None
+                        await self._finalize()
+                    else:
+                        text_task = asyncio.create_task(self._text.get())
+                        await self._on_text(chunk)
+        finally:
+            if text_task is not None:
+                text_task.cancel()
+            changed_task.cancel()
+
+    def _any_unfinished(self) -> bool:
+        return any(not seg.stream.finished for seg in self._segments)
+
+    async def _on_stream_ended(self) -> None:
+        """Handle a Soniox retirement of the segment still open for text."""
+        current = self._current
+        if (
+            current is None
+            or not current.stream.retired
+            or current.retired_handled
+        ):
+            return
+        current.retired_handled = True
+        await self._on_retired(current)
+
+    async def _open_segment(self) -> _Segment:
+        """Open a fresh Soniox stream and queue it for the consumer."""
+        conn = self._conn
+        if (
+            conn is None
+            or not conn.alive
+            or conn.active_streams >= MAX_STREAMS_PER_CONN
+        ):
+            conn = await self._pool._claim()
+            self._conn = conn
+        stream_id = uuid.uuid4().hex
+        stream = _Stream(stream_id)
+        stream.on_finish = self._changed.set
+        conn._streams[stream_id] = stream
+        seg = _Segment(conn=conn, stream=stream)
+        self._segments.append(seg)
+        try:
+            await conn.send_json({**self._options, "stream_id": stream_id})
+        except Exception:
+            conn._streams.pop(stream_id, None)
+            self._segments.remove(seg)
+            raise
+        self._current = seg
+        await self._output.put(seg)
+        _LOGGER.debug(
+            "Soniox TTS opened stream %s (%s connection)",
+            stream_id,
+            "warm" if conn.warm else "cold",
+        )
+        return seg
+
+    async def _on_text(self, chunk: str) -> None:
+        seg = self._current
+        if seg is None or seg.closed_for_text:
+            seg = await self._open_next_segment(seg)
+        await self._send_text(seg, chunk)
+
+    async def _on_retired(self, seg: _Segment | None) -> None:
+        """Soniox retired a stream; replay its text if it never spoke."""
+        if seg is None:
+            return
+        _LOGGER.debug("Soniox TTS stream %s retired by server", seg.stream.stream_id)
+        if self._current is seg:
+            self._current = None
+        if seg.stream.had_audio or not seg.sent_text:
+            # Already spoke (replaying would repeat speech) or carried no text.
+            return
+        await self._open_next_segment(seg)
+
+    async def _open_next_segment(self, old: _Segment | None) -> _Segment:
+        """Open a fresh segment, replaying ``old``'s unsynthesized text if any."""
+        # One replay covers text that crossed a retirement; a second retirement
+        # of the same text means Soniox is not synthesizing it, so fail rather
+        # than replay forever.
+        replay = (
+            old is not None
+            and old.stream.retired
+            and not old.stream.had_audio
+            and bool(old.sent_text)
+        )
+        if replay and old is not None and old.replayed:
+            raise HomeAssistantError(
+                f"Soniox TTS stream {old.stream.stream_id} retired twice "
+                "before speaking"
+            )
+        seg = await self._open_segment()
+        if replay and old is not None:
+            seg.replayed = True
+            _LOGGER.debug(
+                "Soniox TTS replaying %d text chunk(s) onto stream %s",
+                len(old.sent_text),
+                seg.stream.stream_id,
+            )
+            for text in old.sent_text:
+                await self._send_text(seg, text)
+            if old.text_end_sent:
+                await self._send_text_end(seg)
+        return seg
+
+    async def _finalize(self) -> None:
+        """message_gen exhausted: end the open segment (today's behaviour)."""
+        seg = self._current
+        if seg is not None and not seg.closed_for_text:
+            await self._send_text_end(seg)
+
+    async def _send_text(self, seg: _Segment, text: str) -> None:
+        await seg.conn.send_json(
+            {"text": text, "text_end": False, "stream_id": seg.stream.stream_id}
+        )
+        seg.sent_text.append(text)
+
+    async def _send_text_end(self, seg: _Segment) -> None:
+        if seg.text_end_sent:
+            return
+        seg.text_end_sent = True
+        await seg.conn.send_json(
+            {"text": "", "text_end": True, "stream_id": seg.stream.stream_id}
+        )
+
+
 class SonioxTTSPool:
     """Per-config-entry pool owning the Soniox TTS WebSocket protocol (issue #8)."""
 
@@ -302,66 +661,26 @@ class SonioxTTSPool:
 
         Claims an idle warm conn (no re-handshake — one ``ws_connect`` across
         warm + request, issue #8 AC2) or dials a borrowed conn that closes
-        after its stream. A warm-up still in flight is never awaited: the
-        request dials its own borrowed conn instead (issue #8 AC2b).
+        after the request. The pre-emptive segment opens immediately (before
+        any text exists); later segments are opened as text resumes after a
+        Soniox retirement, all joined into one byte stream.
         """
         started = time.monotonic()
         conn = await self._claim()
-        stream_id = uuid.uuid4().hex
-        stream = _Stream(stream_id)
-        conn._streams[stream_id] = stream
-        warm = conn.warm
-        first_text_at: float | None = None
-
-        async def _timed_text() -> AsyncGenerator[str]:
-            # Streaming LLM pipelines open the TTS stream (at the tool call)
-            # long before any speakable text exists, so first-audio latency is
-            # only meaningful measured from the first text chunk.
-            nonlocal first_text_at
-            async for chunk in message_gen:
-                if chunk and first_text_at is None:
-                    first_text_at = time.monotonic()
-                yield chunk
-
+        session = _RequestSession(self, conn, options, started=started)
         try:
-            await conn.send_json({**options, "stream_id": stream_id})
+            await session.open_first()
         except Exception as err:  # noqa: BLE001 — dead socket at config time
-            conn._streams.pop(stream_id, None)
-            await conn.close(reason=str(err))
+            await session.aclose(close_all=True)
             raise HomeAssistantError(
                 f"Soniox TTS streaming connection failed: {err}"
             ) from err
-
-        pump_task = asyncio.create_task(conn.pump_text(stream_id, _timed_text()))
-        first_chunk = True
+        session.start(message_gen)
         try:
-            while True:
-                item = await stream.queue.get()
-                if item is None:
-                    if stream.error is not None:
-                        raise HomeAssistantError(stream.error)
-                    return
-                if first_chunk:
-                    now = time.monotonic()
-                    _LOGGER.debug(
-                        "Soniox TTS first audio frame %.0f ms after request, "
-                        "%.0f ms after first text (%s connection)",
-                        (now - started) * 1000,
-                        (now - (first_text_at or started)) * 1000,
-                        "warm" if warm else "cold",
-                    )
-                    first_chunk = False
-                yield item
+            async for chunk in session.consume():
+                yield chunk
         finally:
-            if not pump_task.done():
-                pump_task.cancel()
-            try:
-                await pump_task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                pass
-            conn._streams.pop(stream_id, None)
-            if conn.warm is False:
-                await conn.close(reason="stream finished")
+            await session.aclose()
 
     async def async_shutdown(self) -> None:
         """Cancel every pool task and close every connection (idempotent).
