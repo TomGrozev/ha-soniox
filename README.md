@@ -13,9 +13,9 @@ provider, ready to plug into the Assist voice pipeline.
 > endorsed by, or maintained by Soniox. The Soniox name and logo are used
 > with permission for the purpose of this community integration.
 
-- **STT (realtime)** — `stt-rt-v5` over WebSocket. Supports 60+ languages
+- **STT (realtime)** — `stt-rt-v6` over WebSocket. Supports 60+ languages
   and sends low-latency final tokens as the user speaks.
-- **STT (async)** — `stt-async-v5` via the Files + Transcriptions REST API.
+- **STT (async)** — `stt-async-v6` via the Files + Transcriptions REST API.
   Buffers the utterance, uploads it, and polls for a higher-accuracy transcript.
 - **TTS** — `tts-rt-v2` voices. Assist uses the Soniox WebSocket so audio
   chunks (WAV/PCM) start playing before the sentence is finished. `tts.speak`
@@ -58,8 +58,8 @@ Open the integration's **Configure** screen to set model and voice defaults:
 
 | Option              | Default      | Notes                                                                |
 | ------------------- | ------------ | -------------------------------------------------------------------- |
-| Realtime STT model  | `stt-rt-v5`  | WebSocket streaming. Used by the `Speech-to-Text` entity.            |
-| Async STT model     | `stt-async-v5` | File upload + poll. Used by the `Speech-to-Text (Async)` entity.   |
+| Realtime STT model  | `stt-rt-v6`  | WebSocket streaming. Used by the `Speech-to-Text` entity.            |
+| Async STT model     | `stt-async-v6` | File upload + poll. Used by the `Speech-to-Text (Async)` entity.   |
 | TTS model           | `tts-rt-v2`  | Soniox real-time TTS model.                                          |
 | Default TTS voice   | `Maya`       | Any voice from the Soniox catalog (see below).                       |
 | Default TTS language| `en`         | Two-letter ISO code.                                                 |

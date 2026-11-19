@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Changed
+
+- New installs and migrated legacy entries now use Soniox STT v6
+  (`stt-rt-v6`, `stt-async-v6`); v5 is deprecated and removed on
+  December 15, 2026. Existing entries keep their saved STT model, and Soniox
+  routes v5 requests to v6 after that date.
+- The TTS model dropdown no longer offers `tts-rt-v1`, which Soniox removed
+  on August 31, 2026. Entries still saved on it keep working and are not
+  changed.
+
 ### Fixed
 
 - Streaming TTS no longer stays silent until the whole LLM reply is in. Soniox's

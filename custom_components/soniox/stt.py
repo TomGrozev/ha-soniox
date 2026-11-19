@@ -257,7 +257,7 @@ class SonioxSTTEntity(SpeechToTextEntity):
         stream: AsyncIterable[bytes],
         model: str,
     ) -> SpeechResult:
-        """Buffer the utterance, upload it, and poll stt-async-v5 for a transcript."""
+        """Buffer the utterance, upload it, and poll the async model for a transcript."""
         pcm = bytearray()
         async for chunk in stream:
             if chunk:

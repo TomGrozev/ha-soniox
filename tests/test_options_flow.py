@@ -144,8 +144,8 @@ async def test_options_fetch_failure_fresh_entry_still_savable(hass, aioclient_m
     result = await hass.config_entries.options.async_configure(
         result["flow_id"],
         {
-            CONF_STT_MODEL: "stt-rt-v5",
-            CONF_STT_ASYNC_MODEL: "stt-async-v5",
+            CONF_STT_MODEL: "stt-rt-v6",
+            CONF_STT_ASYNC_MODEL: "stt-async-v6",
             CONF_TTS_MODEL: "tts-rt-v2",
             CONF_TTS_VOICE: "Maya",
             CONF_TTS_LANGUAGE: "en",
@@ -181,8 +181,8 @@ async def test_options_fetch_failure_preserves_saved_voice(hass, aioclient_mock)
     result = await hass.config_entries.options.async_configure(
         result["flow_id"],
         {
-            CONF_STT_MODEL: "stt-rt-v5",
-            CONF_STT_ASYNC_MODEL: "stt-async-v5",
+            CONF_STT_MODEL: "stt-rt-v6",
+            CONF_STT_ASYNC_MODEL: "stt-async-v6",
             CONF_TTS_MODEL: "tts-rt-v2",
             CONF_TTS_VOICE: "Daniel",
             CONF_TTS_LANGUAGE: "en",
@@ -212,8 +212,8 @@ async def test_options_save_roundtrip(hass, aioclient_mock):
     result = await hass.config_entries.options.async_configure(
         result["flow_id"],
         {
-            CONF_STT_MODEL: "stt-rt-v5",
-            CONF_STT_ASYNC_MODEL: "stt-async-v5",
+            CONF_STT_MODEL: "stt-rt-v6",
+            CONF_STT_ASYNC_MODEL: "stt-async-v6",
             CONF_TTS_MODEL: "tts-rt-v2",
             CONF_TTS_VOICE: "Maya",
             CONF_TTS_LANGUAGE: "en",
@@ -290,8 +290,8 @@ async def test_options_fetch_failure_preserves_saved_speed(hass, aioclient_mock)
     result = await hass.config_entries.options.async_configure(
         result["flow_id"],
         {
-            CONF_STT_MODEL: "stt-rt-v5",
-            CONF_STT_ASYNC_MODEL: "stt-async-v5",
+            CONF_STT_MODEL: "stt-rt-v6",
+            CONF_STT_ASYNC_MODEL: "stt-async-v6",
             CONF_TTS_MODEL: "tts-rt-v2",
             CONF_TTS_LANGUAGE: "en",
             CONF_TTS_AUDIO_FORMAT: "mp3",

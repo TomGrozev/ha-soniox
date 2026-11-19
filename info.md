@@ -8,8 +8,8 @@ powered by [Soniox](https://soniox.com) — 60+ languages, low-latency streaming
 
 ## Highlights
 
-- Real-time STT (`stt-rt-v5`) — WebSocket streaming with final tokens.
-- Async STT (`stt-async-v5`) — file upload + poll for higher-accuracy transcripts.
+- Real-time STT (`stt-rt-v6`) — WebSocket streaming with final tokens.
+- Async STT (`stt-async-v6`) — file upload + poll for higher-accuracy transcripts.
 - TTS (`tts-rt-v2`) with 28 voices, every voice speaks every language.
 - Per-call voice and audio-format overrides.
 - No external Python dependencies — built on Home Assistant's bundled `aiohttp`.

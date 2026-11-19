@@ -70,13 +70,13 @@ def endpoints_for_region(region: str) -> SonioxEndpoints:
     )
 
 # Models (https://soniox.com/docs/stt/models, https://soniox.com/docs/tts/models)
-STT_REALTIME_MODELS: Final = ["stt-rt-v5"]
-STT_ASYNC_MODELS: Final = ["stt-async-v5"]
-TTS_MODELS: Final = ["tts-rt-v2", "tts-rt-v1"]
+STT_REALTIME_MODELS: Final = ["stt-rt-v6"]
+STT_ASYNC_MODELS: Final = ["stt-async-v6"]
+TTS_MODELS: Final = ["tts-rt-v2"]
 
 # Defaults
-DEFAULT_STT_MODEL: Final = "stt-rt-v5"
-DEFAULT_STT_ASYNC_MODEL: Final = "stt-async-v5"
+DEFAULT_STT_MODEL: Final = "stt-rt-v6"
+DEFAULT_STT_ASYNC_MODEL: Final = "stt-async-v6"
 DEFAULT_TTS_MODEL: Final = "tts-rt-v2"
 DEFAULT_TTS_VOICE: Final = "Maya"
 DEFAULT_TTS_LANGUAGE: Final = "en"
