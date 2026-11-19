@@ -25,6 +25,7 @@ import asyncio
 import base64
 import json
 import logging
+import re
 import time
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterable, Callable
@@ -70,6 +71,20 @@ KEEPALIVE_INTERVAL = 25
 # (https://soniox.com/docs/tts/rt/streams).
 MAX_STREAMS_PER_CONN = 5
 
+# tts-rt-v2 holds back text under ~80 characters until more text or text_end
+# arrives; a later sentence or trailing whitespace does not release it
+# (measured on tts-rt.jp.soniox.com). So when the text pauses this long at a
+# sentence end (an LLM tool call), the pump sends text_end and the sentence
+# speaks now; the next text opens a fresh stream. Faster text stays on one
+# stream, which keeps one tone of voice.
+SENTENCE_IDLE_TEXT_END = 0.25
+
+# ., !, ? or …, then optional closing quotes/brackets, then optional whitespace.
+_SENTENCE_END_RE = re.compile(r"[.!?…][\"'”’»)\]}]*\s*$")
+# Text tail kept per segment so a sentence end split across chunks still
+# matches; only a longer run of trailing whitespace defeats it (no early end).
+_SENTENCE_TAIL_CHARS = 64
+
 
 @dataclass
 class _Stream:
@@ -109,6 +124,8 @@ class _Segment:
     conn: _TTSConnection
     stream: _Stream
     sent_text: list[str] = field(default_factory=list)
+    # Last _SENTENCE_TAIL_CHARS of sent_text, for the sentence-end check.
+    text_tail: str = ""
     text_end_sent: bool = False
     retired_handled: bool = False
     # True when this segment was opened to carry another segment's replayed
@@ -120,16 +137,22 @@ class _Segment:
         """True when no further text may go to this stream.
 
         Only an explicit end closes a segment to more text: our own text_end
-        (``text_end_sent``, sent by the end-of-message finalize or when
-        replaying a retired segment's text), a Soniox 408 retirement, or a dead
-        connection. A bare ``terminated`` frame does not — Soniox never ends a
-        stream we have not text_end'ed without first reporting a 408.
+        (``text_end_sent``, sent by the end-of-message finalize, after a pause
+        at a sentence end, or when replaying a retired segment's text), a
+        Soniox 408 retirement, or a dead connection. A bare ``terminated``
+        frame does not, since Soniox never ends a stream we have not
+        text_end'ed without first reporting a 408.
         """
         return (
             self.text_end_sent
             or self.stream.retired
             or self.stream.error is not None
         )
+
+    @property
+    def ends_sentence(self) -> bool:
+        """True when the text sent so far ends at a sentence end."""
+        return _SENTENCE_END_RE.search(self.text_tail) is not None
 
 
 class _TTSConnection:
@@ -341,9 +364,10 @@ class _RequestSession:
     can pause for seconds (e.g. a tool call). Soniox retires a stream left
     without text for a few seconds (error_code 408 / request_timeout) and
     offers NO per-stream keepalive; that retirement is itself the signal to
-    open a fresh stream for the next text, so the client keeps no timer of its
-    own — every segment's audio joined into the one container byte stream Home
-    Assistant asked for
+    open a fresh stream for the next text. The only client timer is the
+    sentence-end idle (``SENTENCE_IDLE_TEXT_END``), which ends a stream early so
+    short text speaks before the reply is complete. Every segment's audio is
+    joined into the one container byte stream Home Assistant asked for
     (https://soniox.com/docs/tts/rt/connection-keepalive).
     """
 
@@ -480,6 +504,9 @@ class _RequestSession:
             self._text.get()
         )
         changed_task = asyncio.create_task(self._changed.wait())
+        # Runs while the open segment's text rests at a sentence end; firing
+        # sends text_end. New text cancels it so fast text stays on one stream.
+        idle_task: asyncio.Task[None] | None = None
         gen_done = False
         try:
             while True:
@@ -488,6 +515,8 @@ class _RequestSession:
                 waiters: list[asyncio.Task[Any]] = [changed_task]
                 if text_task is not None:
                     waiters.append(text_task)
+                if idle_task is not None:
+                    waiters.append(idle_task)
                 done, _ = await asyncio.wait(
                     waiters, return_when=asyncio.FIRST_COMPLETED
                 )
@@ -496,6 +525,10 @@ class _RequestSession:
                     changed_task = asyncio.create_task(self._changed.wait())
                     await self._on_stream_ended()
                 if text_task is not None and text_task in done:
+                    # Text that lands with the timer counts as arriving first.
+                    if idle_task is not None:
+                        idle_task.cancel()
+                        idle_task = None
                     chunk = text_task.result()
                     if chunk is None:
                         gen_done = True
@@ -504,9 +537,19 @@ class _RequestSession:
                     else:
                         text_task = asyncio.create_task(self._text.get())
                         await self._on_text(chunk)
+                        current = self._current
+                        if current is not None and current.ends_sentence:
+                            idle_task = asyncio.create_task(
+                                asyncio.sleep(SENTENCE_IDLE_TEXT_END)
+                            )
+                if idle_task is not None and idle_task in done:
+                    idle_task = None
+                    await self._on_sentence_idle()
         finally:
             if text_task is not None:
                 text_task.cancel()
+            if idle_task is not None:
+                idle_task.cancel()
             changed_task.cancel()
 
     def _any_unfinished(self) -> bool:
@@ -523,6 +566,17 @@ class _RequestSession:
             return
         current.retired_handled = True
         await self._on_retired(current)
+
+    async def _on_sentence_idle(self) -> None:
+        """Text paused at a sentence end: text_end the open segment."""
+        seg = self._current
+        if seg is None or seg.closed_for_text or not seg.ends_sentence:
+            return
+        _LOGGER.debug(
+            "Soniox TTS text paused at a sentence end; text_end on stream %s",
+            seg.stream.stream_id,
+        )
+        await self._send_text_end(seg)
 
     async def _open_segment(self) -> _Segment:
         """Open a fresh Soniox stream and queue it for the consumer."""
@@ -614,6 +668,7 @@ class _RequestSession:
             {"text": text, "text_end": False, "stream_id": seg.stream.stream_id}
         )
         seg.sent_text.append(text)
+        seg.text_tail = (seg.text_tail + text)[-_SENTENCE_TAIL_CHARS:]
 
     async def _send_text_end(self, seg: _Segment) -> None:
         if seg.text_end_sent:

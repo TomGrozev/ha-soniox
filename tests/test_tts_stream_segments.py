@@ -2,12 +2,14 @@
 
 An LLM pipeline opens the TTS request before any speakable text exists and can
 pause for seconds (a tool call). Soniox retires a stream left without text for
-a few seconds (a 408 / request_timeout) and has no per-stream keepalive; the
-pool keeps no timer of its own — that retirement is the signal to open a fresh
-stream for the next text, every segment's audio joined into the one byte stream
-HA asked for. A stream Soniox retires under us must not fail the request: any
-text that never reached synthesis is replayed on the next stream, and a later
-400 for the retired stream is ignored.
+a few seconds (a 408 / request_timeout) and has no per-stream keepalive; that
+retirement is the signal to open a fresh stream for the next text, every
+segment's audio joined into the one byte stream HA asked for. A stream Soniox
+retires under us must not fail the request: any text that never reached
+synthesis is replayed on the next stream, and a later 400 for the retired
+stream is ignored. Text that pauses at a sentence end is text_end'ed after
+``SENTENCE_IDLE_TEXT_END`` so tts-rt-v2 speaks it without waiting for the
+rest of the reply.
 
 Frames are tagged with the ``stream_id`` of the config/text that precedes them
 (a callable scripted item reads the fake's ``.sent``), so the demuxer routes
@@ -28,6 +30,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import DATA_ENTITY_PLATFORM
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.soniox import pool as pool_module
 from custom_components.soniox.const import (
     CONF_API_KEY,
     CONF_REGION,
@@ -504,4 +507,147 @@ async def test_replayed_text_retired_again_fails_instead_of_looping(
         await asyncio.wait_for(task, timeout=3)
     gen.close()
     assert len(_configs(ws)) == 2  # pre-emptive stream + exactly one replay
+    await _unload(hass, entry)
+
+
+# -- sentence-end idle text_end ---------------------------------------------
+
+
+@pytest.fixture
+def short_idle(monkeypatch):
+    """Shrink the sentence-end idle so the tests pause past it quickly."""
+    monkeypatch.setattr(pool_module, "SENTENCE_IDLE_TEXT_END", 0.05)
+
+
+async def test_sentence_pause_text_ends_and_next_text_opens_new_stream(
+    hass, aioclient_mock, mock_soniox_ws, short_idle
+):
+    """A paused sentence gets its own text_end; audio stays in segment order."""
+    entry, tts = await _setup_entry(hass, aioclient_mock)
+    gen = _ScriptedGen()
+
+    async def _a1(ws):
+        await _wait_for(lambda: _text_ends(ws))
+        return {"audio": _b64(b"A1"), "stream_id": _sid_for_text(ws, 0)}
+
+    async def _b1(ws):
+        # B's audio lands while A is still streaming; it must play after A.
+        await _wait_for(lambda: len(_texts(ws)) >= 2)
+        return {"audio": _b64(b"B1"), "stream_id": _sid_for_text(ws, 1)}
+
+    async def _a2(ws):
+        return {"audio": _b64(b"A2"), "stream_id": _sid_for_text(ws, 0)}
+
+    async def _a_term(ws):
+        return {"terminated": True, "stream_id": _sid_for_text(ws, 0)}
+
+    async def _b_term(ws):
+        await _wait_for(lambda: len(_text_ends(ws)) >= 2)
+        return {"terminated": True, "stream_id": _sid_for_text(ws, 1)}
+
+    ws = mock_soniox_ws([_a1, _b1, _a2, _a_term, _b_term], url=_TTS_URL)
+
+    task = asyncio.create_task(_collect(tts, gen, _pcm()))
+    gen.push("Let me check the garage sensor for you.")
+    await _wait_for(lambda: _text_ends(ws))
+    gen.push("The door is closed.")
+    gen.close()
+    chunks = await task
+
+    assert chunks == [b"A1", b"A2", b"B1"]
+    configs = _configs(ws)
+    assert len(configs) == 2
+    ends = _text_ends(ws)
+    assert [e["stream_id"] for e in ends] == [
+        configs[0]["stream_id"],
+        configs[1]["stream_id"],
+    ]
+    assert _texts(ws)[1]["stream_id"] == configs[1]["stream_id"]
+    await _unload(hass, entry)
+
+
+async def test_fast_text_after_sentence_stays_on_one_stream(
+    hass, aioclient_mock, mock_soniox_ws, monkeypatch
+):
+    """Text arriving inside the idle window keeps the stream; one text_end."""
+    monkeypatch.setattr(pool_module, "SENTENCE_IDLE_TEXT_END", 0.5)
+    entry, tts = await _setup_entry(hass, aioclient_mock)
+    gen = _ScriptedGen()
+
+    async def _end(ws):
+        await _wait_for(lambda: _text_ends(ws))
+        return {"terminated": True, "stream_id": _sid_for_text(ws, 0)}
+
+    ws = mock_soniox_ws([_end], url=_TTS_URL)
+
+    task = asyncio.create_task(_collect(tts, gen, _pcm()))
+    gen.push("Hello there.")
+    await _wait_for(lambda: _texts(ws))
+    await asyncio.sleep(0.05)
+    gen.push(" How are you?")
+    await _wait_for(lambda: len(_texts(ws)) >= 2)
+    await asyncio.sleep(0.05)
+    assert _text_ends(ws) == []
+    gen.close()
+    await task
+
+    assert len(_configs(ws)) == 1
+    assert {t["stream_id"] for t in _texts(ws)} == {_configs(ws)[0]["stream_id"]}
+    assert len(_text_ends(ws)) == 1
+    await _unload(hass, entry)
+
+
+async def test_pause_mid_sentence_does_not_text_end(
+    hass, aioclient_mock, mock_soniox_ws, short_idle
+):
+    """Without closing punctuation a pause past the idle keeps the stream open."""
+    entry, tts = await _setup_entry(hass, aioclient_mock)
+    gen = _ScriptedGen()
+
+    async def _end(ws):
+        await _wait_for(lambda: _text_ends(ws))
+        return {"terminated": True, "stream_id": _sid_for_text(ws, 0)}
+
+    ws = mock_soniox_ws([_end], url=_TTS_URL)
+
+    task = asyncio.create_task(_collect(tts, gen, _pcm()))
+    gen.push("Let me check the")
+    await _wait_for(lambda: _texts(ws))
+    await asyncio.sleep(0.2)  # four idle windows
+    assert _text_ends(ws) == []
+    gen.push(" garage.")
+    gen.close()
+    await task
+
+    assert len(_configs(ws)) == 1
+    assert len(_text_ends(ws)) == 1
+    await _unload(hass, entry)
+
+
+async def test_end_of_message_after_sentence_text_end_sends_no_second(
+    hass, aioclient_mock, mock_soniox_ws, short_idle
+):
+    """message_gen ending after an idle text_end adds no second text_end."""
+    entry, tts = await _setup_entry(hass, aioclient_mock)
+    gen = _ScriptedGen()
+
+    async def _audio(ws):
+        await _wait_for(lambda: _text_ends(ws))
+        return {"audio": _b64(b"AAA"), "stream_id": _sid_for_text(ws, 0)}
+
+    async def _term(ws):
+        return {"terminated": True, "stream_id": _sid_for_text(ws, 0)}
+
+    ws = mock_soniox_ws([_audio, _term], url=_TTS_URL)
+
+    task = asyncio.create_task(_collect(tts, gen, _pcm()))
+    gen.push("Okay.")
+    await _wait_for(lambda: _text_ends(ws))
+    await asyncio.sleep(0.1)
+    gen.close()
+    chunks = await task
+
+    assert chunks == [b"AAA"]
+    assert len(_configs(ws)) == 1
+    assert len(_text_ends(ws)) == 1
     await _unload(hass, entry)
