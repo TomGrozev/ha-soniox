@@ -51,7 +51,6 @@ class SonioxEndpoints:
     stt_files_url: str
     stt_transcriptions_url: str
     stt_websocket_url: str
-    tts_rest_url: str
     tts_websocket_url: str
     tts_models_url: str
     voices_url: str
@@ -65,7 +64,6 @@ def endpoints_for_region(region: str) -> SonioxEndpoints:
         stt_files_url=f"https://{api}/v1/files",
         stt_transcriptions_url=f"https://{api}/v1/transcriptions",
         stt_websocket_url=f"wss://{stt_rt}/transcribe-websocket",
-        tts_rest_url=f"https://{tts_rt}/tts",
         tts_websocket_url=f"wss://{tts_rt}/tts-websocket",
         tts_models_url=f"https://{api}/v1/tts-models",
         voices_url=f"https://{api}/v1/voices",

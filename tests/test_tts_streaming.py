@@ -1,16 +1,18 @@
 """Tests for Soniox TTS codec streaming (audio format + WS text frames).
 
-Issue #6 acceptance criteria: the codec travels on ATTR_PREFERRED_FORMAT
-with CONF_TTS_AUDIO_FORMAT as the saved options-flow default; REST file
-output stays mp3; no outgoing message ever carries HA's internal
-``audio_output`` option.
+Issue #6 acceptance criteria: the codec travels on ATTR_PREFERRED_FORMAT; no
+outgoing message ever carries HA's internal ``audio_output`` option.
 
 Issue #7 acceptance criteria: the streaming path requests the consumer's
 preferred format whenever Soniox produces it natively (flac, mp3, aac, pcm,
-wav) — only formats Soniox cannot stream fall back to wav — so HA's tts
+wav); only formats Soniox cannot stream fall back to wav, so HA's tts
 component sees ``extension == final_extension`` and skips its ffmpeg
 transcode. ``pcm`` still normalizes to ``pcm_s16le`` (a real Soniox
 format), keeping a flac-negotiating satellite (HA Voice PE) transcoding-free.
+
+Issue #12 acceptance criteria: ``tts.speak`` and an Assist-style stream
+produce their audio over the Soniox WebSocket, and neither sends an HTTP POST
+to the Soniox REST API.
 """
 
 from __future__ import annotations
@@ -19,19 +21,29 @@ import asyncio
 import base64
 from pathlib import Path
 
+from homeassistant.components import media_source
+from homeassistant.components.media_player import (
+    MediaPlayerEntity,
+    MediaPlayerEntityFeature,
+)
 from homeassistant.components.tts import (
     ATTR_AUDIO_OUTPUT,
     ATTR_PREFERRED_FORMAT,
+    DATA_TTS_MANAGER,
     TTSAudioRequest,
+    async_create_stream,
 )
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.helpers.entity_platform import DATA_ENTITY_PLATFORM
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from homeassistant.setup import async_setup_component
+from pytest_homeassistant_custom_component.common import (
+    MockConfigEntry,
+    MockEntityPlatform,
+)
 
 from custom_components.soniox.const import (
     CONF_API_KEY,
     CONF_REGION,
-    CONF_TTS_AUDIO_FORMAT,
     DOMAIN,
     REGION_US,
     endpoints_for_region,
@@ -81,32 +93,43 @@ async def _load_entity(hass, aioclient_mock, *, options=None):
     return next(e for e in entities if e.entity_id == "tts.soniox_united_states_text_to_speech")
 
 
-async def _post_body(hass, aioclient_mock, entity, *, options=None):
-    """Run the REST TTS path and return the JSON body aioclient_mock captured."""
-    aioclient_mock.post(
-        endpoints_for_region(REGION_US).tts_rest_url, content=b"audio"
+class _RecordingMediaPlayer(MediaPlayerEntity):
+    """Media player that resolves the TTS media source like a real player."""
+
+    _attr_name = "Test speaker"
+    _attr_supported_features = MediaPlayerEntityFeature.PLAY_MEDIA
+
+    def __init__(self) -> None:
+        self.media_id: str | None = None
+        self.resolved = None
+
+    async def async_play_media(self, media_type, media_id, **kwargs) -> None:
+        self.media_id = media_id
+        self.resolved = await media_source.async_resolve_media(
+            self.hass, media_id, self.entity_id
+        )
+
+
+async def _setup_media_player(hass) -> _RecordingMediaPlayer:
+    """Register a media player that resolves the TTS media source."""
+    assert await async_setup_component(hass, "media_source", {}) is True
+    assert await async_setup_component(hass, "media_player", {}) is True
+    player = _RecordingMediaPlayer()
+    platform = MockEntityPlatform(
+        hass, domain="media_player", platform_name="test_media_player"
     )
-    audio = await entity.async_get_tts_audio(
-        "hello", "en", options or {}
-    )
-    assert audio is not None
-    posts = [call for call in aioclient_mock.mock_calls if call[0] == "POST"]
-    assert posts, "expected one REST POST in aioclient_mock.mock_calls"
-    return posts[-1][2]
+    await platform.async_add_entities([player])
+    return player
+
+
+def _assert_no_http_post(aioclient_mock) -> None:
+    """The mocked HTTP client fails unmocked calls; also assert no POST at all."""
+    assert not [call for call in aioclient_mock.mock_calls if call[0] == "POST"]
 
 
 async def _stream(entity, mock_soniox_ws, incoming, options=None, message_gen=None):
-    """Run the WS TTS path and return ``(config, ws)``.
-
-    Overrides the shared (synchronous) fake ``send_json`` with an async one,
-    because the integration ``await``s it (aiohttp's is a coroutine).
-    """
+    """Run the WS TTS path and return ``(config, ws)``."""
     ws = mock_soniox_ws(incoming)
-
-    async def _send_json(data, **_: object):
-        ws.sent.append(data)
-
-    ws.send_json = _send_json
 
     async def _default_gen():
         yield "hello"
@@ -134,53 +157,66 @@ async def test_no_audio_output_in_supported_or_default_options(
     assert ATTR_AUDIO_OUTPUT not in entity.default_options
 
 
-async def test_rest_body_has_no_audio_output(hass, aioclient_mock):
-    """The REST request body never carries audio_output."""
+async def test_tts_speak_streams_audio_without_rest(
+    hass, aioclient_mock, mock_soniox_ws
+):
+    """tts.speak produces its audio over the WebSocket, never the REST endpoint."""
     entity = await _load_entity(hass, aioclient_mock)
-    body = await _post_body(hass, aioclient_mock, entity)
-    assert "audio_output" not in body
+    hass.data[DATA_TTS_MANAGER].use_file_cache = False
+    player = await _setup_media_player(hass)
+
+    ws = mock_soniox_ws(
+        [{"audio": base64.b64encode(b"aa").decode(), "terminated": True}]
+    )
+
+    await hass.services.async_call(
+        "tts",
+        "speak",
+        {
+            "entity_id": entity.entity_id,
+            "media_player_entity_id": player.entity_id,
+            "message": "hello",
+            "cache": False,
+            "options": {ATTR_PREFERRED_FORMAT: "mp3"},
+        },
+        blocking=True,
+    )
+
+    assert player.media_id is not None
+    assert player.resolved is not None
+    assert ws.sent, "expected a WebSocket config message"
+    assert ws.sent[0]["audio_format"] == "mp3"
+    _assert_no_http_post(aioclient_mock)
+
+    (stream,) = hass.data[DATA_TTS_MANAGER].token_to_stream.values()
+    audio = b"".join([chunk async for chunk in stream.async_stream_result()])
+    assert audio == b"aa"
+    assert stream.extension == "mp3"
 
 
-async def test_rest_format_from_preferred_format(hass, aioclient_mock):
-    """ATTR_PREFERRED_FORMAT drives the REST audio_format + wav sample rate."""
+async def test_assist_stream_produces_audio_without_rest(
+    hass, aioclient_mock, mock_soniox_ws
+):
+    """The Assist pipeline's TTS stream call yields WebSocket audio and no POST."""
     entity = await _load_entity(hass, aioclient_mock)
-    body = await _post_body(
-        hass, aioclient_mock, entity, options={ATTR_PREFERRED_FORMAT: "wav"}
+    hass.data[DATA_TTS_MANAGER].use_file_cache = False
+
+    ws = mock_soniox_ws(
+        [{"audio": base64.b64encode(b"aa").decode(), "terminated": True}]
     )
-    assert body["audio_format"] == "wav"
-    assert body["sample_rate"] == 24000
 
-
-async def test_rest_format_defaults_to_saved_option(hass, aioclient_mock):
-    """REST format falls back to CONF_TTS_AUDIO_FORMAT, else mp3."""
-    entity = await _load_entity(
-        hass, aioclient_mock, options={CONF_TTS_AUDIO_FORMAT: "wav"}
+    stream = async_create_stream(
+        hass,
+        engine=entity.entity_id,
+        language="en",
+        options={ATTR_PREFERRED_FORMAT: "mp3"},
     )
-    body = await _post_body(hass, aioclient_mock, entity)
-    assert body["audio_format"] == "wav"
+    stream.async_set_message("hello")
 
-    # A second config entry makes a deduplicated entity id; select the default
-    # (no saved format) instance directly rather than by entity id.
-    await _load_entity(hass, aioclient_mock)
-    default_entity = next(
-        e
-        for platform in hass.data[DATA_ENTITY_PLATFORM][DOMAIN]
-        for e in platform.entities.values()
-        if e.entity_id.startswith("tts.")
-        and CONF_TTS_AUDIO_FORMAT not in e._entry.options
-    )
-    default_body = await _post_body(hass, aioclient_mock, default_entity)
-    assert default_body["audio_format"] == "mp3"
-
-
-async def test_tts_speak_file_extension_mp3(hass, aioclient_mock):
-    """tts.speak file output is mp3 via the REST path (no preferred format)."""
-    entity = await _load_entity(hass, aioclient_mock)
-    aioclient_mock.post(
-        endpoints_for_region(REGION_US).tts_rest_url, content=b"audio"
-    )
-    result = await entity.async_get_tts_audio("hello", "en", {})
-    assert result == ("mp3", b"audio")
+    audio = b"".join([chunk async for chunk in stream.async_stream_result()])
+    assert audio == b"aa"
+    assert ws.sent[0]["audio_format"] == "mp3"
+    _assert_no_http_post(aioclient_mock)
 
 
 async def test_stream_config_has_no_audio_output(
@@ -256,11 +292,6 @@ async def test_stream_response_extension_matches_received_format(
     """
     entity = await _load_entity(hass, aioclient_mock)
     ws = mock_soniox_ws([{"terminated": True}])
-
-    async def _send_json(data, **_: object):
-        ws.sent.append(data)
-
-    ws.send_json = _send_json
 
     async def _gen():
         yield "hello"
@@ -343,11 +374,6 @@ async def test_stream_yields_audio_before_generator_completes(
             {"terminated": True},
         ]
     )
-
-    async def _send_json(data, **_: object):
-        ws.sent.append(data)
-
-    ws.send_json = _send_json
 
     request = TTSAudioRequest(language="en", options={}, message_gen=_gen())
     response = await entity.async_stream_tts_audio(request)

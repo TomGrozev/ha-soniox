@@ -1,4 +1,4 @@
-"""Tests for Soniox per-request TTS speed (REST body + WS config + options)."""
+"""Tests for Soniox per-request TTS speed (WS config + options)."""
 
 from __future__ import annotations
 
@@ -65,20 +65,6 @@ async def _load_entity(hass, aioclient_mock, *, options=None):
     return next(e for e in entities if e.entity_id == "tts.soniox_united_states_text_to_speech")
 
 
-async def _post_body(hass, aioclient_mock, entity, *, options=None):
-    """Run the REST TTS path and return the JSON body aioclient_mock captured."""
-    aioclient_mock.post(
-        endpoints_for_region(REGION_US).tts_rest_url, content=b"audio"
-    )
-    audio = await entity.async_get_tts_audio(
-        "hello", "en", options or {}
-    )
-    assert audio is not None
-    posts = [call for call in aioclient_mock.mock_calls if call[0] == "POST"]
-    assert posts, "expected one REST POST in aioclient_mock.mock_calls"
-    return posts[-1][2]
-
-
 async def _stream_config(entity, mock_soniox_ws, *, options=None):
     """Run the WS TTS path and return the first (config) message the WS got."""
     ws = mock_soniox_ws([{"terminated": True}])
@@ -103,40 +89,52 @@ async def _stream_config(entity, mock_soniox_ws, *, options=None):
     return ws.sent[0]
 
 
-async def test_rest_speed_per_request_overrides_option(hass, aioclient_mock):
+async def test_stream_ws_config_per_request_speed_overrides_option(
+    hass, aioclient_mock, mock_soniox_ws
+):
     """A per-request ATTR_SPEED beats the CONF_TTS_SPEED option default."""
     entity = await _load_entity(
         hass, aioclient_mock, options={CONF_TTS_SPEED: 0.8}
     )
-    body = await _post_body(hass, aioclient_mock, entity, options={ATTR_SPEED: 1.2})
-    assert body["speed"] == 1.2
+    config = await _stream_config(
+        entity, mock_soniox_ws, options={ATTR_SPEED: 1.2}
+    )
+    assert config["speed"] == 1.2
 
 
-async def test_rest_speed_clamped_to_model_bounds(hass, aioclient_mock):
+async def test_stream_ws_config_speed_clamped_to_model_bounds(
+    hass, aioclient_mock, mock_soniox_ws
+):
     """Per-request speed is clamped to the model's speed_min/speed_max."""
     entity = await _load_entity(hass, aioclient_mock)
-    high = await _post_body(hass, aioclient_mock, entity, options={ATTR_SPEED: 5.0})
+    high = await _stream_config(entity, mock_soniox_ws, options={ATTR_SPEED: 5.0})
     assert high["speed"] == 1.3
-    low = await _post_body(hass, aioclient_mock, entity, options={ATTR_SPEED: 0.1})
+    low = await _stream_config(entity, mock_soniox_ws, options={ATTR_SPEED: 0.1})
     assert low["speed"] == 0.7
 
 
-async def test_rest_speed_option_default_when_no_per_request(hass, aioclient_mock):
+async def test_stream_ws_config_speed_option_default(
+    hass, aioclient_mock, mock_soniox_ws
+):
     """Without a per-request speed, the option default is sent."""
     entity = await _load_entity(
         hass, aioclient_mock, options={CONF_TTS_SPEED: 0.9}
     )
-    body = await _post_body(hass, aioclient_mock, entity)
-    assert body["speed"] == 0.9
+    config = await _stream_config(entity, mock_soniox_ws)
+    assert config["speed"] == 0.9
 
 
-async def test_rest_speed_omitted_for_unsupported_model(hass, aioclient_mock):
-    """tts-rt-v1 has supports_speed_adjustment false => no speed is sent."""
+async def test_stream_ws_config_ignores_per_request_speed_for_unsupported_model(
+    hass, aioclient_mock, mock_soniox_ws
+):
+    """A per-request speed cannot override an unsupported model's omission."""
     entity = await _load_entity(
         hass, aioclient_mock, options={CONF_TTS_MODEL: "tts-rt-v1"}
     )
-    body = await _post_body(hass, aioclient_mock, entity, options={ATTR_SPEED: 1.2})
-    assert "speed" not in body
+    config = await _stream_config(
+        entity, mock_soniox_ws, options={ATTR_SPEED: 1.2}
+    )
+    assert "speed" not in config
 
 
 async def test_stream_ws_config_has_speed(hass, aioclient_mock, mock_soniox_ws):

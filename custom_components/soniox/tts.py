@@ -14,12 +14,10 @@ from homeassistant.components.tts import (
     TextToSpeechEntity,
     TTSAudioRequest,
     TTSAudioResponse,
-    TtsAudioType,
     Voice,
 )
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
@@ -29,14 +27,12 @@ from .const import (
     ATTR_SPEED,
     CONF_API_KEY,
     CONF_REGION,
-    CONF_TTS_AUDIO_FORMAT,
     CONF_TTS_LANGUAGE,
     CONF_TTS_MODEL,
     CONF_TTS_SAMPLE_RATE,
     CONF_TTS_SPEED,
     CONF_TTS_VOICE,
     DEFAULT_REGION,
-    DEFAULT_TTS_AUDIO_FORMAT,
     DEFAULT_TTS_LANGUAGE,
     DEFAULT_TTS_MODEL,
     DEFAULT_TTS_SAMPLE_RATE,
@@ -69,9 +65,9 @@ _EXTENSION_BY_FORMAT = {
 # So pass the consumer's preferred format straight through when Soniox can
 # produce it, and keep wav only as the fallback for formats Soniox cannot
 # stream (e.g. ogg/opus containers). The wav tradeoff still exists for
-# playback-while-downloading consumers on constrained devices. Soniox
-# emits mp3, flac, aac, pcm (s16le) and wav natively over the WebSocket.
-_STREAMABLE_FORMATS = {"mp3", "wav", "flac", "aac", "pcm_s16le"}
+# playback-while-downloading consumers on constrained devices. Soniox emits
+# all of those formats natively over the WebSocket.
+_STREAMABLE_FORMATS = frozenset(_EXTENSION_BY_FORMAT)
 _STREAM_DEFAULT_FORMAT = "wav"
 
 
@@ -85,7 +81,7 @@ async def async_setup_entry(
 
 
 class SonioxTTSEntity(TextToSpeechEntity):
-    """Soniox TTS — full-message REST path, streaming WebSocket path."""
+    """Soniox TTS: streaming WebSocket synthesis only."""
 
     _attr_has_entity_name = True
     _attr_name = "Text-to-Speech"
@@ -136,33 +132,6 @@ class SonioxTTSEntity(TextToSpeechEntity):
         voices = model.voices + model.custom_voices if model else ()
         return [Voice(voice_id=v.voice_id, name=v.label) for v in voices]
 
-    async def async_get_tts_audio(
-        self, message: str, language: str, options: dict[str, Any]
-    ) -> TtsAudioType:
-        """One-shot synthesis via the REST endpoint."""
-        _LOGGER.debug("Soniox TTS path: REST (async_get_tts_audio)")
-        body = self._build_request_body(message, language, options)
-        session = async_get_clientsession(self.hass)
-        api_key: str = self._entry.data[CONF_API_KEY]
-
-        try:
-            async with session.post(
-                self._entry.runtime_data.endpoints.tts_rest_url,
-                json=body,
-                headers={"Authorization": f"Bearer {api_key}"},
-                timeout=aiohttp.ClientTimeout(total=60),
-            ) as resp:
-                if resp.status != 200:
-                    err_text = await resp.text()
-                    _LOGGER.error("Soniox TTS HTTP %s: %s", resp.status, err_text)
-                    raise HomeAssistantError(f"Soniox TTS error: {resp.status}")
-                audio = await resp.read()
-        except aiohttp.ClientError as err:
-            raise HomeAssistantError(f"Soniox TTS connection failed: {err}") from err
-
-        extension = _EXTENSION_BY_FORMAT.get(body["audio_format"], "mp3")
-        return extension, audio
-
     async def async_stream_tts_audio(
         self, request: TTSAudioRequest
     ) -> TTSAudioResponse:
@@ -175,7 +144,7 @@ class SonioxTTSEntity(TextToSpeechEntity):
         _LOGGER.debug(
             "Soniox TTS path: WebSocket stream (format=%s)", audio_format
         )
-        extension = _EXTENSION_BY_FORMAT.get(audio_format, "wav")
+        extension = _EXTENSION_BY_FORMAT[audio_format]
         data_gen = self._stream_audio(request, audio_format)
         return TTSAudioResponse(extension=extension, data_gen=data_gen)
 
@@ -194,18 +163,6 @@ class SonioxTTSEntity(TextToSpeechEntity):
         if isinstance(preferred, str) and preferred in _STREAMABLE_FORMATS:
             return preferred
         return _STREAM_DEFAULT_FORMAT
-
-    def _resolve_request_format(self, options: dict[str, Any]) -> str:
-        """Resolve the codec for a one-shot REST request.
-
-        Callers request the output format on ATTR_PREFERRED_FORMAT (Assist
-        pipelines put tts_audio_output there); the saved options-flow default
-        is the fallback, keeping tts.speak file output on the saved format.
-        """
-        preferred = options.get(ATTR_PREFERRED_FORMAT)
-        if isinstance(preferred, str) and preferred:
-            return preferred
-        return self._entry.options.get(CONF_TTS_AUDIO_FORMAT, DEFAULT_TTS_AUDIO_FORMAT)
 
     def _resolve_sample_rate(self, options: dict[str, Any]) -> int:
         preferred = options.get(ATTR_PREFERRED_SAMPLE_RATE)
@@ -248,29 +205,6 @@ class SonioxTTSEntity(TextToSpeechEntity):
         speed_min = model.speed_min if model is not None else DEFAULT_SPEED_MIN
         speed_max = model.speed_max if model is not None else DEFAULT_SPEED_MAX
         return max(speed_min, min(speed_max, speed))
-
-    def _build_request_body(
-        self, message: str, language: str, options: dict[str, Any]
-    ) -> dict[str, Any]:
-        voice = options.get(
-            ATTR_VOICE,
-            self._entry.options.get(CONF_TTS_VOICE, DEFAULT_TTS_VOICE),
-        )
-        audio_format = self._resolve_request_format(options)
-        body: dict[str, Any] = {
-            "model": self._entry.options.get(CONF_TTS_MODEL, DEFAULT_TTS_MODEL),
-            "language": (language or self.default_language).split("-", 1)[0].lower(),
-            "voice": voice,
-            "audio_format": audio_format,
-            "text": message,
-        }
-        if audio_format.startswith("pcm") or audio_format == "wav":
-            body["sample_rate"] = int(
-                self._entry.options.get(CONF_TTS_SAMPLE_RATE, DEFAULT_TTS_SAMPLE_RATE)
-            )
-        if (speed := self._resolve_speed(options)) is not None:
-            body["speed"] = speed
-        return body
 
     async def _stream_audio(
         self, request: TTSAudioRequest, audio_format: str
