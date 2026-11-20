@@ -14,6 +14,10 @@
 
 ### Fixed
 
+- A Soniox realtime STT session that keeps its socket open without sending a
+  final reply no longer hangs the Assist turn. The wait after the audio ends is
+  now capped at 10 seconds; a stalled session returns an STT error and logs one
+  line that names the Soniox STT session.
 - Streaming TTS no longer stays silent until the whole LLM reply is in. Soniox's
   tts-rt-v2 model holds back text under about 80 characters until more text or
   `text_end` arrives, so a short opening sentence ("Let me check the garage
