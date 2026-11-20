@@ -39,8 +39,11 @@ from custom_components.soniox import pool as soniox_pool
 from custom_components.soniox.const import (
     CONF_API_KEY,
     CONF_REGION,
+    CONF_TTS_AUDIO_FORMAT,
+    CONF_TTS_SAMPLE_RATE,
     DOMAIN,
     REGION_US,
+    DEFAULT_TTS_SAMPLE_RATE,
     endpoints_for_region,
 )
 
@@ -70,14 +73,14 @@ def _mock_catalog(aioclient_mock):
     return endpoints
 
 
-async def _setup_entry(hass, aioclient_mock):
+async def _setup_entry(hass, aioclient_mock, options=None):
     """Set up one config entry (mocked catalog); return entry + entities."""
     _mock_catalog(aioclient_mock)
     entry = MockConfigEntry(
         domain=DOMAIN,
         version=3,
         data={CONF_API_KEY: "test-api-key", CONF_REGION: REGION_US},
-        options={},
+        options=options or {},
     )
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id) is True
@@ -237,6 +240,48 @@ async def test_stt_start_warms_tts_conn_async_mode(
     warm_config = conns[0].sent[0]
     assert warm_config["api_key"] == "test-api-key"
     assert warm_config["stream_id"]
+    await _unload(hass, entry)
+
+
+async def test_warm_up_sends_sample_rate_for_default_mp3(
+    hass, aioclient_mock, mock_soniox_ws
+):
+    """Soniox takes sample_rate for mp3 too, so the warm-up always sends it."""
+    entry, tts, realtime, async_ = await _setup_entry(hass, aioclient_mock)
+    warm_ws = await _warm_via_stt(
+        realtime,
+        mock_soniox_ws,
+        stt_script=_STT_RESULT,
+        tts_script=[],
+    )
+
+    warm_config = warm_ws.sent[0]
+    assert warm_config["audio_format"] == "mp3"
+    assert warm_config["sample_rate"] == DEFAULT_TTS_SAMPLE_RATE
+    # There is no entry-level bitrate setting and no client request to carry.
+    assert "bitrate" not in warm_config
+    await _unload(hass, entry)
+
+
+async def test_warm_up_sends_configured_sample_rate_for_flac(
+    hass, aioclient_mock, mock_soniox_ws
+):
+    """The configured sample rate is forwarded whatever the audio format."""
+    entry, tts, realtime, async_ = await _setup_entry(
+        hass,
+        aioclient_mock,
+        options={CONF_TTS_AUDIO_FORMAT: "flac", CONF_TTS_SAMPLE_RATE: 48000},
+    )
+    warm_ws = await _warm_via_stt(
+        realtime,
+        mock_soniox_ws,
+        stt_script=_STT_RESULT,
+        tts_script=[],
+    )
+
+    warm_config = warm_ws.sent[0]
+    assert warm_config["audio_format"] == "flac"
+    assert warm_config["sample_rate"] == 48000
     await _unload(hass, entry)
 
 

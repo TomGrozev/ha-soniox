@@ -9,6 +9,8 @@ from typing import Any
 import aiohttp
 from homeassistant.components.tts import (
     ATTR_PREFERRED_FORMAT,
+    ATTR_PREFERRED_SAMPLE_BYTES,
+    ATTR_PREFERRED_SAMPLE_CHANNELS,
     ATTR_PREFERRED_SAMPLE_RATE,
     ATTR_VOICE,
     TextToSpeechEntity,
@@ -24,6 +26,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from . import SonioxConfigEntry
 from .catalog import DEFAULT_SPEED_MAX, DEFAULT_SPEED_MIN
 from .const import (
+    ATTR_PREFERRED_BITRATE,
     ATTR_SPEED,
     CONF_API_KEY,
     CONF_REGION,
@@ -69,6 +72,8 @@ _EXTENSION_BY_FORMAT = {
 # all of those formats natively over the WebSocket.
 _STREAMABLE_FORMATS = frozenset(_EXTENSION_BY_FORMAT)
 _STREAM_DEFAULT_FORMAT = "wav"
+# Soniox takes a bitrate only for the compressed formats (issue #13).
+_BITRATE_FORMATS = frozenset({"mp3", "aac"})
 
 
 async def async_setup_entry(
@@ -108,11 +113,17 @@ class SonioxTTSEntity(TextToSpeechEntity):
 
     @property
     def supported_options(self) -> list[str]:
+        # HA skips its ffmpeg conversion only when every preferred audio
+        # option the client asks for is listed here. Soniox output is mono
+        # 16-bit, so a stereo request still gets mono (accepted tradeoff).
         return [
             ATTR_VOICE,
             ATTR_SPEED,
             ATTR_PREFERRED_FORMAT,
             ATTR_PREFERRED_SAMPLE_RATE,
+            ATTR_PREFERRED_SAMPLE_CHANNELS,
+            ATTR_PREFERRED_SAMPLE_BYTES,
+            ATTR_PREFERRED_BITRATE,
         ]
 
     @property
@@ -174,6 +185,23 @@ class SonioxTTSEntity(TextToSpeechEntity):
         return int(
             self._entry.options.get(CONF_TTS_SAMPLE_RATE, DEFAULT_TTS_SAMPLE_RATE)
         )
+
+    def _resolve_bitrate(self, options: dict[str, Any]) -> int | None:
+        """Resolve the preferred bitrate in bps.
+
+        HA and ESPHome give the bitrate in kbit/s while Soniox takes bps.
+        """
+        preferred = options.get(ATTR_PREFERRED_BITRATE)
+        if preferred is None:
+            return None
+        try:
+            return int(preferred) * 1000
+        except (TypeError, ValueError):
+            _LOGGER.debug(
+                "Soniox TTS invalid bitrate value: %r",
+                preferred,
+            )
+            return None
 
     def _resolve_speed(self, options: dict[str, Any]) -> float | None:
         """Resolve the effective Soniox speed.
@@ -244,9 +272,11 @@ class SonioxTTSEntity(TextToSpeechEntity):
             "language": language,
             "voice": voice,
             "audio_format": audio_format,
+            "sample_rate": self._resolve_sample_rate(request.options),
         }
-        if audio_format.startswith("pcm") or audio_format == "wav":
-            options["sample_rate"] = self._resolve_sample_rate(request.options)
+        if audio_format in _BITRATE_FORMATS:
+            if (bitrate := self._resolve_bitrate(request.options)) is not None:
+                options["bitrate"] = bitrate
         if (speed := self._resolve_speed(request.options)) is not None:
             options["speed"] = speed
         return options

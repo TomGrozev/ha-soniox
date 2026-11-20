@@ -824,10 +824,9 @@ class SonioxTTSPool:
             "voice": self._entry.options.get(CONF_TTS_VOICE, DEFAULT_TTS_VOICE),
             "audio_format": audio_format,
         }
-        if audio_format.startswith("pcm") or audio_format == "wav":
-            options["sample_rate"] = int(
-                self._entry.options.get(
-                    CONF_TTS_SAMPLE_RATE, DEFAULT_TTS_SAMPLE_RATE
-                )
-            )
+        # Soniox honors sample_rate for every format it accepts (pcm_s16le,
+        # wav, flac, mp3, aac), not just the raw ones.
+        options["sample_rate"] = int(
+            self._entry.options.get(CONF_TTS_SAMPLE_RATE, DEFAULT_TTS_SAMPLE_RATE)
+        )
         return options

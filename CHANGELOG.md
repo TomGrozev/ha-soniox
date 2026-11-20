@@ -14,6 +14,12 @@
 
 ### Changed
 
+- Voice satellites such as Voice PE keep their replies out of Home Assistant's
+  ffmpeg step: the TTS entity now declares the preferred sample channel, sample
+  size and bitrate options, and sends the sample rate to Soniox for every
+  format, not only wav and pcm. An MP3 or AAC client's requested bitrate is
+  forwarded too. Soniox output stays mono 16-bit, so a stereo request still
+  gets mono.
 - New installs and migrated legacy entries now use Soniox STT v6
   (`stt-rt-v6`, `stt-async-v6`); v5 is deprecated and removed on
   December 15, 2026. Existing entries keep their saved STT model, and Soniox

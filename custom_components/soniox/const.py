@@ -22,6 +22,9 @@ CONF_TTS_SAMPLE_RATE: Final = "tts_sample_rate"
 CONF_TTS_SPEED: Final = "tts_speed"
 DEFAULT_TTS_SPEED: Final = 1.0
 ATTR_SPEED: Final = "speed"  # per-request option key (not an HA constant)
+# HA's own ATTR_PREFERRED_BITRATE exists only from 2026.9; the string is the
+# public option key HA reads to decide whether to skip its ffmpeg conversion.
+ATTR_PREFERRED_BITRATE: Final = "preferred_bitrate"
 
 # Regional deployments (https://soniox.com/docs/data-residency)
 REGION_US: Final = "us"
