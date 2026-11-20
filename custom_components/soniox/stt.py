@@ -32,9 +32,13 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from . import SonioxConfigEntry
 from .const import (
     CONF_API_KEY,
+    CONF_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL,
+    CONF_MAX_ENDPOINT_DELAY_MS,
     CONF_REGION,
     CONF_STT_ASYNC_MODEL,
     CONF_STT_MODEL,
+    DEFAULT_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL,
+    DEFAULT_MAX_ENDPOINT_DELAY_MS,
     DEFAULT_REGION,
     DEFAULT_STT_ASYNC_MODEL,
     DEFAULT_STT_MODEL,
@@ -55,11 +59,25 @@ _ASYNC_TIMEOUT = 90
 # Assist turn instead of waiting on a socket that never sends `finished`.
 _REALTIME_FINALIZE_TIMEOUT = 10.0
 _CONTROL_TOKENS = frozenset({"<end>", "<fin>"})
-# Soniox control markers, not speech: <end> signals an endpoint-detected
+# Soniox control markers, not speech: <end> marks an endpoint-detected
 # segment boundary (https://soniox.com/docs/stt/rt/endpoint-detection) and
-# <fin> acknowledges a manual finalize. Both arrive as ordinary final
-# tokens, so transcript assembly must skip them or they end up glued
-# onto the text.
+# ends the realtime session; <fin> acknowledges a manual finalize and is
+# only filtered. Both arrive as ordinary final tokens, so transcript
+# assembly must skip them or they end up glued onto the text.
+
+
+def _transcript_latency_ms(
+    elapsed_ms: float, speech_end_ms: float | None, last_audio_ms: float
+) -> int:
+    """Return ms from the end of speech to the transcript, never negative.
+
+    Token timestamps are audio offsets; `elapsed_ms` and `last_audio_ms` are
+    wall-clock offsets from the same session start. Without a token timestamp,
+    the last audio chunk is the closest end-of-speech signal.
+    """
+    if speech_end_ms is None:
+        return max(round(elapsed_ms - last_audio_ms), 0)
+    return max(round(elapsed_ms - speech_end_ms), 0)
 
 
 async def async_setup_entry(
@@ -174,6 +192,17 @@ class SonioxSTTEntity(SpeechToTextEntity):
             "num_channels": int(metadata.channel),
             "language_hints": [language],
             "enable_endpoint_detection": True,
+            "max_endpoint_delay_ms": int(
+                self._entry.options.get(
+                    CONF_MAX_ENDPOINT_DELAY_MS, DEFAULT_MAX_ENDPOINT_DELAY_MS
+                )
+            ),
+            "endpoint_latency_adjustment_level": int(
+                self._entry.options.get(
+                    CONF_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL,
+                    DEFAULT_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL,
+                )
+            ),
         }
 
         session = async_get_clientsession(self.hass)
@@ -204,14 +233,19 @@ class SonioxSTTEntity(SpeechToTextEntity):
         """Pump audio in and collect final tokens out, concurrently."""
         final_tokens: list[str] = []
         send_error: BaseException | None = None
+        session_started_at = time.monotonic()
+        last_audio_at = session_started_at
+        speech_end_ms: float | None = None
+        ended_on_endpoint = False
 
         async def send_audio() -> None:
-            nonlocal send_error
+            nonlocal send_error, last_audio_at
             try:
                 async for chunk in stream:
                     if not chunk:
                         continue
                     await ws.send_bytes(chunk)
+                    last_audio_at = time.monotonic()
                 # Empty string signals end-of-audio to Soniox.
                 await ws.send_str("")
             except Exception as err:  # noqa: BLE001 (surface after receive)
@@ -219,6 +253,7 @@ class SonioxSTTEntity(SpeechToTextEntity):
 
         async def receive() -> bool:
             """Collect final tokens; return False when Soniox reports an error."""
+            nonlocal ended_on_endpoint, speech_end_ms
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     payload = json.loads(msg.data)
@@ -229,14 +264,25 @@ class SonioxSTTEntity(SpeechToTextEntity):
                             payload.get("error_message"),
                         )
                         return False
+                    endpoint_reached = False
                     for token in payload.get("tokens", []):
                         text = token.get("text")
-                        if (
-                            token.get("is_final")
-                            and text
-                            and text.strip() not in _CONTROL_TOKENS
-                        ):
-                            final_tokens.append(text)
+                        if not (token.get("is_final") and text):
+                            continue
+                        marker = text.strip()
+                        if marker in _CONTROL_TOKENS:
+                            if marker == "<end>":
+                                endpoint_reached = True
+                            continue
+                        final_tokens.append(text)
+                        end_ms = token.get("end_ms")
+                        if isinstance(end_ms, (int, float)):
+                            speech_end_ms = max(speech_end_ms or 0.0, end_ms)
+                    # Append the tokens of this frame first: final speech and
+                    # <end> can arrive in the same message.
+                    if endpoint_reached:
+                        ended_on_endpoint = True
+                        return True
                     if payload.get("finished"):
                         return True
                 elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
@@ -246,6 +292,7 @@ class SonioxSTTEntity(SpeechToTextEntity):
         send_task = asyncio.create_task(send_audio())
         receive_task = asyncio.create_task(receive())
 
+        error: str | None = None
         try:
             done, _ = await asyncio.wait(
                 {send_task, receive_task},
@@ -255,7 +302,7 @@ class SonioxSTTEntity(SpeechToTextEntity):
                 # Re-raise a receive failure (bad frame, socket error) as the
                 # old inline loop did, instead of returning a partial transcript.
                 if not receive_task.result():
-                    return None
+                    error = "Soniox error"
             elif send_error is None:
                 # Audio is fully sent: Soniox owes us a final reply, but it
                 # may keep the socket open and never send it.
@@ -263,14 +310,14 @@ class SonioxSTTEntity(SpeechToTextEntity):
                     if not await asyncio.wait_for(
                         receive_task, _REALTIME_FINALIZE_TIMEOUT
                     ):
-                        return None
+                        error = "Soniox error"
                 except TimeoutError:
                     _LOGGER.error(
                         "Soniox STT session did not finish within %ss of the "
                         "audio ending; ending the voice turn",
                         _REALTIME_FINALIZE_TIMEOUT,
                     )
-                    return None
+                    error = "no final reply"
         finally:
             send_task.cancel()
             receive_task.cancel()
@@ -278,11 +325,26 @@ class SonioxSTTEntity(SpeechToTextEntity):
                 send_task, receive_task, return_exceptions=True
             )
 
-        if send_error is not None:
+        if error is None and send_error is not None:
             _LOGGER.error("Soniox STT audio upload failed: %s", send_error)
-            return None
+            error = "upload failed"
 
-        return "".join(final_tokens).strip() or None
+        text = None if error else ("".join(final_tokens).strip() or None)
+        reason = error or (
+            "endpoint detected" if ended_on_endpoint else "audio stream ended"
+        )
+        if error is None and text is None:
+            reason = "empty transcript"
+        _LOGGER.debug(
+            "Soniox STT transcript %d ms after the end of speech (%s)",
+            _transcript_latency_ms(
+                (time.monotonic() - session_started_at) * 1000,
+                speech_end_ms,
+                (last_audio_at - session_started_at) * 1000,
+            ),
+            reason,
+        )
+        return text
 
     async def _process_async(
         self,

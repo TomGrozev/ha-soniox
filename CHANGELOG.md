@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Added
+
+- An Assist turn now ends as soon as Soniox endpoint detection sends `<end>`,
+  instead of waiting for Home Assistant's VAD to close the audio stream. Two
+  new options tune the detector: `max_endpoint_delay_ms` (500–3000 ms, default
+  2000) and `endpoint_latency_adjustment_level` (0–3, default 0). With debug
+  logging on, each realtime STT session logs the time from the last audio
+  chunk to the transcript as `Soniox STT transcript … ms after the last audio
+  chunk (endpoint detected)` or `(audio stream ended)`.
+
 ### Changed
 
 - New installs and migrated legacy entries now use Soniox STT v6

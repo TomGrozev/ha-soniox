@@ -13,6 +13,8 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.soniox.const import (
     CONF_API_KEY,
+    CONF_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL,
+    CONF_MAX_ENDPOINT_DELAY_MS,
     CONF_REGION,
     CONF_STT_ASYNC_MODEL,
     CONF_STT_MODEL,
@@ -80,6 +82,15 @@ def _speed_selector(result: dict):
         (marker, sel)
         for marker, sel in result["data_schema"].schema.items()
         if marker.schema == CONF_TTS_SPEED
+    )
+
+
+def _number_selector(result: dict, key: str):
+    """Return (field, selector) of a numeric options-schema entry."""
+    return next(
+        (marker, sel)
+        for marker, sel in result["data_schema"].schema.items()
+        if marker.schema == key
     )
 
 
@@ -301,3 +312,73 @@ async def test_options_fetch_failure_preserves_saved_speed(hass, aioclient_mock)
 
     assert result["type"] == "create_entry"
     assert result["data"][CONF_TTS_SPEED] == 0.9
+
+
+async def test_options_endpoint_fields_show_bounds_and_saved_values(
+    hass, aioclient_mock
+):
+    """Both endpoint options render as bounded BOX numbers with saved values."""
+    _mock_catalog(aioclient_mock)
+    entry = _entry(
+        hass,
+        options={
+            CONF_MAX_ENDPOINT_DELAY_MS: 1000,
+            CONF_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL: 2,
+        },
+    )
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+
+    assert result["type"] == "form"
+    assert result["errors"] == {}
+
+    delay_field, delay_selector = _number_selector(
+        result, CONF_MAX_ENDPOINT_DELAY_MS
+    )
+    assert delay_field.default() == 1000
+    assert delay_selector.selector_type == "number"
+    assert delay_selector.config["min"] == 500
+    assert delay_selector.config["max"] == 3000
+    assert delay_selector.config["step"] == 100
+    assert delay_selector.config["mode"] == "box"
+
+    level_field, level_selector = _number_selector(
+        result, CONF_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL
+    )
+    assert level_field.default() == 2
+    assert level_selector.selector_type == "number"
+    assert level_selector.config["min"] == 0
+    assert level_selector.config["max"] == 3
+    assert level_selector.config["step"] == 1
+    assert level_selector.config["mode"] == "box"
+
+
+async def test_options_endpoint_values_persist_as_ints(hass, aioclient_mock):
+    """Saving non-default endpoint values stores them as ints."""
+    _mock_catalog(aioclient_mock)
+    entry = _entry(hass)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert result["type"] == "form"
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {
+            CONF_STT_MODEL: "stt-rt-v6",
+            CONF_STT_ASYNC_MODEL: "stt-async-v6",
+            CONF_TTS_MODEL: "tts-rt-v2",
+            CONF_TTS_VOICE: "Maya",
+            CONF_TTS_LANGUAGE: "en",
+            CONF_TTS_AUDIO_FORMAT: "mp3",
+            CONF_TTS_SAMPLE_RATE: "24000",
+            CONF_MAX_ENDPOINT_DELAY_MS: "1000",
+            CONF_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL: "2",
+        },
+    )
+
+    assert result["type"] == "create_entry"
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert updated.options[CONF_MAX_ENDPOINT_DELAY_MS] == 1000
+    assert updated.options[CONF_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL] == 2
+    assert isinstance(updated.options[CONF_MAX_ENDPOINT_DELAY_MS], int)
+    assert isinstance(updated.options[CONF_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL], int)

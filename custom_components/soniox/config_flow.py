@@ -29,6 +29,8 @@ from homeassistant.helpers.selector import (
 from .catalog import CatalogFetchError, CatalogModel, async_fetch_catalog
 from .const import (
     CONF_API_KEY,
+    CONF_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL,
+    CONF_MAX_ENDPOINT_DELAY_MS,
     CONF_REGION,
     CONF_STT_ASYNC_MODEL,
     CONF_STT_MODEL,
@@ -38,6 +40,8 @@ from .const import (
     CONF_TTS_SAMPLE_RATE,
     CONF_TTS_SPEED,
     CONF_TTS_VOICE,
+    DEFAULT_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL,
+    DEFAULT_MAX_ENDPOINT_DELAY_MS,
     DEFAULT_REGION,
     DEFAULT_STT_ASYNC_MODEL,
     DEFAULT_STT_MODEL,
@@ -221,12 +225,18 @@ class SonioxOptionsFlow(OptionsFlow):
     ) -> ConfigFlowResult:
         """Show / save the options form."""
         if user_input is not None:
-            try:
-                user_input[CONF_TTS_SAMPLE_RATE] = int(
-                    user_input[CONF_TTS_SAMPLE_RATE]
-                )
-            except (KeyError, TypeError, ValueError):
-                user_input[CONF_TTS_SAMPLE_RATE] = DEFAULT_TTS_SAMPLE_RATE
+            for key, default in (
+                (CONF_TTS_SAMPLE_RATE, DEFAULT_TTS_SAMPLE_RATE),
+                (CONF_MAX_ENDPOINT_DELAY_MS, DEFAULT_MAX_ENDPOINT_DELAY_MS),
+                (
+                    CONF_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL,
+                    DEFAULT_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL,
+                ),
+            ):
+                try:
+                    user_input[key] = int(user_input[key])
+                except (KeyError, TypeError, ValueError):
+                    user_input[key] = default
             # Preserve a previously saved speed when the form held no speed
             # field (fetch failure or model without speed adjustment).
             user_input.setdefault(
@@ -309,6 +319,33 @@ class SonioxOptionsFlow(OptionsFlow):
             ): SelectSelector(
                 SelectSelectorConfig(
                     options=stt_model_options, mode=SelectSelectorMode.DROPDOWN
+                )
+            ),
+            vol.Optional(
+                CONF_MAX_ENDPOINT_DELAY_MS,
+                default=opts.get(
+                    CONF_MAX_ENDPOINT_DELAY_MS, DEFAULT_MAX_ENDPOINT_DELAY_MS
+                ),
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=500,
+                    max=3000,
+                    step=100,
+                    mode=NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Optional(
+                CONF_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL,
+                default=opts.get(
+                    CONF_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL,
+                    DEFAULT_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL,
+                ),
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=0,
+                    max=3,
+                    step=1,
+                    mode=NumberSelectorMode.BOX,
                 )
             ),
             vol.Optional(

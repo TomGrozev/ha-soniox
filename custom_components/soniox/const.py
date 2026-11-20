@@ -12,6 +12,8 @@ CONF_API_KEY: Final = "api_key"
 CONF_REGION: Final = "region"
 CONF_STT_MODEL: Final = "stt_model"
 CONF_STT_ASYNC_MODEL: Final = "stt_async_model"
+CONF_MAX_ENDPOINT_DELAY_MS: Final = "max_endpoint_delay_ms"
+CONF_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL: Final = "endpoint_latency_adjustment_level"
 CONF_TTS_MODEL: Final = "tts_model"
 CONF_TTS_VOICE: Final = "tts_voice"
 CONF_TTS_LANGUAGE: Final = "tts_language"
@@ -77,6 +79,11 @@ TTS_MODELS: Final = ["tts-rt-v2"]
 # Defaults
 DEFAULT_STT_MODEL: Final = "stt-rt-v6"
 DEFAULT_STT_ASYNC_MODEL: Final = "stt-async-v6"
+# Soniox endpoint detection defaults. The selector bounds in config_flow.py
+# stay here as literals because Soniox owns those limits, not this integration.
+# https://soniox.com/docs/stt/rt/endpoint-detection
+DEFAULT_MAX_ENDPOINT_DELAY_MS: Final = 2000
+DEFAULT_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL: Final = 0
 DEFAULT_TTS_MODEL: Final = "tts-rt-v2"
 DEFAULT_TTS_VOICE: Final = "Maya"
 DEFAULT_TTS_LANGUAGE: Final = "en"
