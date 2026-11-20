@@ -8,6 +8,8 @@ them onto the transcript we hand Home Assistant.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from pathlib import Path
 
 from homeassistant.components.stt import (
@@ -24,6 +26,7 @@ from homeassistant.config_entries import ConfigEntryState
 from homeassistant.helpers.entity_platform import DATA_ENTITY_PLATFORM
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.soniox import stt as stt_module
 from custom_components.soniox.const import (
     CONF_API_KEY,
     CONF_REGION,
@@ -150,6 +153,35 @@ async def test_realtime_drops_midstream_markers_between_segments(
 
     assert result.result == SpeechResultState.SUCCESS
     assert result.text == "Turn on the kitchen light"
+
+
+async def test_realtime_stalled_final_reply_ends_turn_with_error(
+    hass, aioclient_mock, mock_soniox_ws, monkeypatch, caplog
+):
+    """A socket that never sends `finished` must not hang the voice turn (#10)."""
+    realtime, _ = await _setup_entry(hass, aioclient_mock)
+    monkeypatch.setattr(stt_module, "_REALTIME_FINALIZE_TIMEOUT", 0.05)
+    # An Event holds the receive loop open with no server frames, like a live
+    # socket that stays connected after the audio has been sent.
+    mock_soniox_ws([asyncio.Event()])
+    caplog.set_level(logging.ERROR, logger="custom_components.soniox.stt")
+
+    result = await asyncio.wait_for(
+        realtime.async_process_audio_stream(
+            _metadata(), _stream_chunks(b"pcmpcm")
+        ),
+        timeout=1,
+    )
+
+    assert result.result == SpeechResultState.ERROR
+    errors = [
+        record
+        for record in caplog.records
+        if record.levelno == logging.ERROR
+        and record.name == "custom_components.soniox.stt"
+    ]
+    assert len(errors) == 1
+    assert "Soniox STT session" in errors[0].getMessage()
 
 
 async def test_async_tokens_transcript_strips_end_marker(

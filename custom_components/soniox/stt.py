@@ -50,6 +50,10 @@ _LOGGER = logging.getLogger(__name__)
 _AUDIO_FORMAT = "pcm_s16le"
 _ASYNC_POLL_INTERVAL = 0.5
 _ASYNC_TIMEOUT = 90
+# Soniox finalizes a realtime session within a couple of seconds of the audio
+# ending. Ten seconds tolerates a slow link while still ending a stalled
+# Assist turn instead of waiting on a socket that never sends `finished`.
+_REALTIME_FINALIZE_TIMEOUT = 10.0
 _CONTROL_TOKENS = frozenset({"<end>", "<fin>"})
 # Soniox control markers, not speech: <end> signals an endpoint-detected
 # segment boundary (https://soniox.com/docs/stt/rt/endpoint-detection) and
@@ -210,12 +214,11 @@ class SonioxSTTEntity(SpeechToTextEntity):
                     await ws.send_bytes(chunk)
                 # Empty string signals end-of-audio to Soniox.
                 await ws.send_str("")
-            except Exception as err:  # noqa: BLE001 — surface in receive loop
+            except Exception as err:  # noqa: BLE001 (surface after receive)
                 send_error = err
 
-        send_task = asyncio.create_task(send_audio())
-
-        try:
+        async def receive() -> bool:
+            """Collect final tokens; return False when Soniox reports an error."""
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     payload = json.loads(msg.data)
@@ -225,7 +228,7 @@ class SonioxSTTEntity(SpeechToTextEntity):
                             err_code,
                             payload.get("error_message"),
                         )
-                        return None
+                        return False
                     for token in payload.get("tokens", []):
                         text = token.get("text")
                         if (
@@ -235,15 +238,45 @@ class SonioxSTTEntity(SpeechToTextEntity):
                         ):
                             final_tokens.append(text)
                     if payload.get("finished"):
-                        break
+                        return True
                 elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
-                    break
+                    return True
+            return True
+
+        send_task = asyncio.create_task(send_audio())
+        receive_task = asyncio.create_task(receive())
+
+        try:
+            done, _ = await asyncio.wait(
+                {send_task, receive_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if receive_task in done:
+                # Re-raise a receive failure (bad frame, socket error) as the
+                # old inline loop did, instead of returning a partial transcript.
+                if not receive_task.result():
+                    return None
+            elif send_error is None:
+                # Audio is fully sent: Soniox owes us a final reply, but it
+                # may keep the socket open and never send it.
+                try:
+                    if not await asyncio.wait_for(
+                        receive_task, _REALTIME_FINALIZE_TIMEOUT
+                    ):
+                        return None
+                except TimeoutError:
+                    _LOGGER.error(
+                        "Soniox STT session did not finish within %ss of the "
+                        "audio ending; ending the voice turn",
+                        _REALTIME_FINALIZE_TIMEOUT,
+                    )
+                    return None
         finally:
             send_task.cancel()
-            try:
-                await send_task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                pass
+            receive_task.cancel()
+            await asyncio.gather(
+                send_task, receive_task, return_exceptions=True
+            )
 
         if send_error is not None:
             _LOGGER.error("Soniox STT audio upload failed: %s", send_error)
