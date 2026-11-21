@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 (2026-11-21)
 
 > This repository is Tom Grozev's fork of
 > [FrancescoMasaia/ha-soniox](https://github.com/FrancescoMasaia/ha-soniox),
