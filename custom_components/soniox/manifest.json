@@ -1,6 +1,7 @@
 {
   "domain": "soniox",
   "name": "Soniox",
+  "after_dependencies": ["assist_pipeline"],
   "codeowners": ["@TomGrozev", "@FrancescoMasaia"],
   "config_flow": true,
   "dependencies": [],

@@ -20,6 +20,10 @@ import base64
 from pathlib import Path
 
 import aiohttp
+from homeassistant.components.assist_pipeline.pipeline import (
+    async_get_pipelines,
+    async_update_pipeline,
+)
 from homeassistant.components.stt import (
     AudioBitRates,
     AudioChannels,
@@ -33,6 +37,7 @@ from homeassistant.components.stt import (
 from homeassistant.components.tts import ATTR_PREFERRED_FORMAT, TTSAudioRequest
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.helpers.entity_platform import DATA_ENTITY_PLATFORM
+from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.soniox import pool as soniox_pool
@@ -78,8 +83,28 @@ def _mock_catalog(aioclient_mock):
     return endpoints
 
 
+async def _pair_pipeline(hass, stt_entity_id: str, tts_entity_id: str) -> None:
+    """Make the home's Assist pipeline pair this STT with the given TTS engine."""
+    assert await async_setup_component(hass, "homeassistant", {}) is True
+    assert await async_setup_component(hass, "assist_pipeline", {}) is True
+    await hass.async_block_till_done()
+    for pipeline in async_get_pipelines(hass):
+        await async_update_pipeline(
+            hass,
+            pipeline,
+            stt_engine=stt_entity_id,
+            stt_language="en",
+            tts_engine=tts_entity_id,
+            tts_language="en",
+        )
+
+
 async def _setup_entry(hass, aioclient_mock, options=None):
-    """Set up one config entry (mocked catalog); return entry + entities."""
+    """Set up one config entry (mocked catalog); return entry + entities.
+
+    Also points the home's Assist pipeline at this entry's realtime STT and TTS
+    entities, since warming is gated on that pairing (issue #17).
+    """
     _mock_catalog(aioclient_mock)
     entry = MockConfigEntry(
         domain=DOMAIN,
@@ -100,6 +125,7 @@ async def _setup_entry(hass, aioclient_mock, options=None):
     stt = [e for e in entities if isinstance(e, SpeechToTextEntity)]
     realtime = next(e for e in stt if e._mode == "realtime")
     async_ = next(e for e in stt if e._mode == "async")
+    await _pair_pipeline(hass, realtime.entity_id, tts.entity_id)
     return entry, tts, realtime, async_
 
 
@@ -124,8 +150,11 @@ def _b64(data: bytes) -> str:
 
 
 def _tts_conns(factory) -> list:
-    """The registered connections whose URL is the TTS websocket."""
-    return [c for c in factory.connections if c.url.endswith("tts-websocket")]
+    """The registered connections whose URL is the TTS websocket.
+
+    A scripted fake that was never dialed keeps ``url`` None.
+    """
+    return [c for c in factory.connections if (c.url or "").endswith("tts-websocket")]
 
 
 async def _run_request(entity, *, options=None, message_gen=None):
@@ -199,7 +228,7 @@ async def _unload(hass, entry):
 
 
 async def test_stt_start_warms_tts_conn_realtime(hass, aioclient_mock, mock_soniox_ws):
-    """AC1 (realtime): TTS conn opens+authenticates with no TTS request present."""
+    """Issue #8 AC1 (realtime); issue #17: a paired pipeline still warms."""
     entry, tts, realtime, async_ = await _setup_entry(hass, aioclient_mock)
     endpoints = endpoints_for_region(REGION_US)
     mock_soniox_ws(_STT_RESULT, url=endpoints.stt_websocket_url)
@@ -222,6 +251,7 @@ async def test_stt_start_warms_tts_conn_async_mode(
 ):
     """AC1 (async): the async file-upload STT path warms the pool the same way."""
     entry, tts, realtime, async_ = await _setup_entry(hass, aioclient_mock)
+    await _pair_pipeline(hass, async_.entity_id, tts.entity_id)
     endpoints = endpoints_for_region(REGION_US)
     aioclient_mock.post(endpoints.stt_files_url, json={"id": "file-1"})
     aioclient_mock.post(endpoints.stt_transcriptions_url, json={"id": "tr-1"})
@@ -287,6 +317,27 @@ async def test_warm_up_sends_configured_sample_rate_for_flac(
     warm_config = warm_ws.sent[0]
     assert warm_config["audio_format"] == "flac"
     assert warm_config["sample_rate"] == 48000
+    await _unload(hass, entry)
+
+
+# -- warming is gated on the pipeline's TTS engine (issue #17) -----------
+
+
+async def test_stt_start_with_other_tts_engine_opens_no_tts_conn(
+    hass, aioclient_mock, mock_soniox_ws
+):
+    """Issue #17: another TTS engine's reply cannot use a Soniox socket."""
+    entry, tts, realtime, async_ = await _setup_entry(hass, aioclient_mock)
+    await _pair_pipeline(hass, realtime.entity_id, "tts.home_assistant_cloud")
+    endpoints = endpoints_for_region(REGION_US)
+    mock_soniox_ws(_STT_RESULT, url=endpoints.stt_websocket_url)
+    mock_soniox_ws([], url=endpoints.tts_websocket_url)
+
+    result = await realtime.async_process_audio_stream(_metadata(), _stream_chunks(b"x"))
+    await hass.async_block_till_done()
+
+    assert result.result == SpeechResultState.SUCCESS
+    assert _tts_conns(mock_soniox_ws) == []
     await _unload(hass, entry)
 
 

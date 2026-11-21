@@ -13,6 +13,10 @@ from typing import Literal
 
 import aiohttp
 
+from homeassistant.components.assist_pipeline.pipeline import (
+    KEY_ASSIST_PIPELINE,
+    async_get_pipelines,
+)
 from homeassistant.components.homeassistant.exposed_entities import (
     async_should_expose,
 )
@@ -27,6 +31,7 @@ from homeassistant.components.stt import (
     SpeechResultState,
     SpeechToTextEntity,
 )
+from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import entity_registry as er
@@ -58,6 +63,7 @@ from .const import (
     DOMAIN,
     REGION_LABELS,
     is_async_stt_model,
+    tts_unique_id,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -137,6 +143,33 @@ def _home_context_terms(hass: HomeAssistant) -> list[str]:
         terms.append(name)
         total_chars += added_chars
     return terms
+
+
+def _pipeline_pairs_entry_tts(
+    hass: HomeAssistant, stt_entity_id: str | None, entry_id: str
+) -> bool:
+    """Return True when an Assist pipeline pairs this STT with this entry's TTS.
+
+    Warming only pays off when the reply is synthesized by the Soniox TTS entity
+    of the same config entry; any other engine leaves the socket unused
+    (issue #17). An STT engine is not told which pipeline run called it, so the
+    stored pipelines are the only signal available at STT start: a home that
+    runs the same Soniox STT in two pipelines with different TTS engines warms
+    for both, and the unused socket closes on Soniox's no-audio timeout
+    (keepalives are not billed).
+    """
+    if stt_entity_id is None or hass.data.get(KEY_ASSIST_PIPELINE) is None:
+        return False
+    tts_entity_id = er.async_get(hass).async_get_entity_id(
+        Platform.TTS, DOMAIN, tts_unique_id(entry_id)
+    )
+    if tts_entity_id is None:
+        return False
+    return any(
+        pipeline.stt_engine == stt_entity_id
+        and pipeline.tts_engine == tts_entity_id
+        for pipeline in async_get_pipelines(hass)
+    )
 
 
 async def async_setup_entry(
@@ -249,11 +282,15 @@ class SonioxSTTEntity(SpeechToTextEntity):
         self, metadata: SpeechMetadata, stream: AsyncIterable[bytes]
     ) -> SpeechResult:
         """Dispatch to the realtime WebSocket or the async file API."""
-        # Issue #8: STT start is a strong signal a TTS reply is coming — open
-        # the TTS websocket speculatively so the response stream reuses it.
-        # Warming is fire-and-forget and must never delay or fail STT.
+        # Issue #8: STT start is a strong signal a TTS reply is coming, so the
+        # TTS websocket is opened speculatively and the response stream reuses
+        # it. Issue #17 narrows that to a pipeline that replies through this
+        # entry's TTS. Warming must never delay or fail STT.
         try:
-            self._entry.runtime_data.tts_pool.async_warm()
+            if _pipeline_pairs_entry_tts(
+                self.hass, self.entity_id, self._entry.entry_id
+            ):
+                self._entry.runtime_data.tts_pool.async_warm()
         except Exception as err:  # noqa: BLE001 — warming must not break STT
             _LOGGER.debug("Soniox TTS warm-up could not be started: %s", err)
         model = self._selected_model()

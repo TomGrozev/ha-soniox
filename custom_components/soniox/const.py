@@ -115,6 +115,15 @@ SUPPORTED_LANGUAGES: Final = [
 ]
 
 
+def tts_unique_id(entry_id: str) -> str:
+    """Return the unique id of the config entry's TTS entity.
+
+    Assist pipelines store engines as entity ids, so STT resolves the sibling
+    TTS entity from the registry through this unique id.
+    """
+    return f"{entry_id}-tts"
+
+
 def is_async_stt_model(model: str) -> bool:
     """Return True if the model uses the async (file) STT API."""
     return "async" in model

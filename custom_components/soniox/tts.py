@@ -44,6 +44,7 @@ from .const import (
     DOMAIN,
     REGION_LABELS,
     SUPPORTED_LANGUAGES,
+    tts_unique_id,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -93,7 +94,7 @@ class SonioxTTSEntity(TextToSpeechEntity):
 
     def __init__(self, entry: SonioxConfigEntry) -> None:
         self._entry = entry
-        self._attr_unique_id = f"{entry.entry_id}-tts"
+        self._attr_unique_id = tts_unique_id(entry.entry_id)
         region = entry.data.get(CONF_REGION, DEFAULT_REGION)
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},

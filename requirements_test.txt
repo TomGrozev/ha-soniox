@@ -9,9 +9,19 @@
 # The pin tracks the integration's declared HA floor (2025.12):
 # 0.13.301 == homeassistant 2025.12.4, requires Python >= 3.13.
 #
-# Install — see tests/README.md (the uv-managed CPython ships the C headers
+# The Assist pipeline tests (issue #17 gates warming on the pipeline's TTS
+# engine) set up `assist_pipeline`, so its component requirements
+# (pymicro-vad, pyspeex-noise) and the `conversation` ones it depends on
+# (hassil, home-assistant-intents) are pinned to the versions those manifests
+# declare for 2025.12.4.
+#
+# Install: see tests/README.md (the uv-managed CPython ships the C headers
 # that lru-dict, an HA 2025.12 dependency, needs to build):
 #   ../ha-soniox-tests/.venv/bin/python -m pytest -q
 pytest-homeassistant-custom-component==0.13.301
 mutagen==1.47.0
 ha-ffmpeg==3.2.2
+hassil==3.5.0
+home-assistant-intents==2025.12.2
+pymicro-vad==1.0.1
+pyspeex-noise==1.0.2

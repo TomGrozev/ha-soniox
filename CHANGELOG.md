@@ -36,6 +36,11 @@
 
 ### Fixed
 
+- A pipeline that replies with a TTS engine other than Soniox no longer opens
+  a Soniox TTS connection when its Soniox speech-to-text starts. The
+  speculative warm-up now runs only when an Assist pipeline pairs the Soniox
+  speech-to-text entity with the Soniox text-to-speech entity of the same
+  config entry, so a reply from another engine leaves no unused socket open.
 - A Soniox realtime STT session that keeps its socket open without sending a
   final reply no longer hangs the Assist turn. The wait after the audio ends is
   now capped at 10 seconds; a stalled session returns an STT error and logs one
