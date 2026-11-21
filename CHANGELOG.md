@@ -15,6 +15,9 @@
   Assist, plus area and floor names, to Soniox as context terms so commands
   such as "turn on the kitchen lights" recognise them. The `stt_home_context`
   option is off by default because it sends home data to Soniox.
+- The config entry now offers a diagnostics download for bug reports. It
+  contains the options, the region and the model and voice counts of the TTS
+  catalog, with the API key redacted.
 
 ### Changed
 
