@@ -32,5 +32,6 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.13"
+      - run: uv venv --python 3.13
       - run: uv pip install -r requirements_test.txt
-      - run: python -m pytest -q
+      - run: uv run python -m pytest -q
