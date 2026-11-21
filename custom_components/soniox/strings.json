@@ -34,6 +34,7 @@
         "data": {
           "stt_model": "Realtime STT model",
           "stt_async_model": "Async STT model",
+          "stt_home_context": "Send home names to Soniox (exposed entities, aliases, areas and floors)",
           "max_endpoint_delay_ms": "STT endpoint max delay (ms)",
           "endpoint_latency_adjustment_level": "STT endpoint latency adjustment level (0-3; higher ends the turn sooner)",
           "tts_model": "TTS model",

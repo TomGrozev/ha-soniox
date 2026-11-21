@@ -13,6 +13,7 @@ import logging
 import re
 from pathlib import Path
 
+from homeassistant.components.homeassistant.exposed_entities import async_expose_entity
 from homeassistant.components.stt import (
     AudioBitRates,
     AudioChannels,
@@ -24,7 +25,11 @@ from homeassistant.components.stt import (
     SpeechToTextEntity,
 )
 from homeassistant.config_entries import ConfigEntryState
+from homeassistant.helpers import area_registry as ar
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import floor_registry as fr
 from homeassistant.helpers.entity_platform import DATA_ENTITY_PLATFORM
+from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.soniox import stt as stt_module
@@ -33,6 +38,7 @@ from custom_components.soniox.const import (
     CONF_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL,
     CONF_MAX_ENDPOINT_DELAY_MS,
     CONF_REGION,
+    CONF_STT_HOME_CONTEXT,
     DOMAIN,
     REGION_US,
     endpoints_for_region,
@@ -255,6 +261,82 @@ async def test_realtime_config_uses_endpoint_defaults(
     assert ws.sent[0][CONF_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL] == 0
 
 
+async def test_realtime_config_omits_home_context_by_default(
+    hass, aioclient_mock, mock_soniox_ws
+):
+    """Home context is opt-in, so the default config carries no home data (#14)."""
+    realtime, _ = await _setup_entry(hass, aioclient_mock)
+    ws = mock_soniox_ws(
+        [
+            {"tokens": [{"text": "Hi", "is_final": True}]},
+            {"finished": True},
+        ]
+    )
+
+    await realtime.async_process_audio_stream(
+        _metadata(), _stream_chunks(b"pcmpcm")
+    )
+
+    assert "context" not in ws.sent[0]
+
+
+async def test_realtime_config_includes_exposed_home_terms(
+    hass, aioclient_mock, mock_soniox_ws
+):
+    """Opting in sends exposed names and aliases plus area and floor names (#14)."""
+    assert await async_setup_component(hass, "homeassistant", {})
+
+    floor = fr.async_get(hass).async_create("Ground floor")
+    ar.async_get(hass).async_create("Kitchen", floor_id=floor.floor_id)
+
+    registry = er.async_get(hass)
+    exposed = registry.async_get_or_create(
+        "light", "demo", "kitchen", suggested_object_id="kitchen"
+    )
+    registry.async_update_entity(exposed.entity_id, aliases={"Ceiling lamp"})
+    hass.states.async_set(
+        exposed.entity_id, "on", {"friendly_name": "Kitchen light"}
+    )
+
+    hidden = registry.async_get_or_create(
+        "light", "demo", "hidden", suggested_object_id="hidden"
+    )
+    registry.async_update_entity(hidden.entity_id, aliases={"Secret lamp"})
+    hass.states.async_set(hidden.entity_id, "on", {"friendly_name": "Secret light"})
+    async_expose_entity(hass, "conversation", hidden.entity_id, False)
+
+    explicitly_exposed = registry.async_get_or_create(
+        "input_text", "demo", "note", suggested_object_id="note"
+    )
+    hass.states.async_set(
+        explicitly_exposed.entity_id, "hi", {"friendly_name": "Doorbell note"}
+    )
+    async_expose_entity(hass, "conversation", explicitly_exposed.entity_id, True)
+
+    realtime, _ = await _setup_entry(
+        hass, aioclient_mock, options={CONF_STT_HOME_CONTEXT: True}
+    )
+    ws = mock_soniox_ws(
+        [
+            {"tokens": [{"text": "Hi", "is_final": True}]},
+            {"finished": True},
+        ]
+    )
+
+    await realtime.async_process_audio_stream(
+        _metadata(), _stream_chunks(b"pcmpcm")
+    )
+
+    terms = ws.sent[0]["context"]["terms"]
+    assert "Kitchen light" in terms
+    assert "Ceiling lamp" in terms
+    assert "Doorbell note" in terms
+    assert "Kitchen" in terms
+    assert "Ground floor" in terms
+    assert "Secret light" not in terms
+    assert "Secret lamp" not in terms
+
+
 async def test_realtime_without_end_returns_transcript_at_stream_end(
     hass, aioclient_mock, mock_soniox_ws
 ):
@@ -466,3 +548,17 @@ async def test_async_text_transcript_drops_trailing_end_marker(
 
     assert result.result == SpeechResultState.SUCCESS
     assert result.text == "Turn on the kitchen light"
+
+
+async def test_home_context_terms_stay_within_soniox_size_limit(hass):
+    """Long names must not push the context past Soniox's character limit (#14)."""
+    assert await async_setup_component(hass, "homeassistant", {})
+    area_registry = ar.async_get(hass)
+    for index in range(30):
+        area_registry.async_create(f"Area {index} " + "x" * 500)
+
+    terms = stt_module._home_context_terms(hass)
+
+    assert terms
+    assert len(", ".join(terms)) <= stt_module._CONTEXT_TERMS_MAX_CHARS
+    assert len(terms) < 30

@@ -17,6 +17,7 @@ from homeassistant.config_entries import (
 from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
+    BooleanSelector,
     NumberSelector,
     NumberSelectorConfig,
     NumberSelectorMode,
@@ -33,6 +34,7 @@ from .const import (
     CONF_MAX_ENDPOINT_DELAY_MS,
     CONF_REGION,
     CONF_STT_ASYNC_MODEL,
+    CONF_STT_HOME_CONTEXT,
     CONF_STT_MODEL,
     CONF_TTS_AUDIO_FORMAT,
     CONF_TTS_LANGUAGE,
@@ -44,6 +46,7 @@ from .const import (
     DEFAULT_MAX_ENDPOINT_DELAY_MS,
     DEFAULT_REGION,
     DEFAULT_STT_ASYNC_MODEL,
+    DEFAULT_STT_HOME_CONTEXT,
     DEFAULT_STT_MODEL,
     DEFAULT_TTS_AUDIO_FORMAT,
     DEFAULT_TTS_LANGUAGE,
@@ -357,6 +360,12 @@ class SonioxOptionsFlow(OptionsFlow):
                     mode=SelectSelectorMode.DROPDOWN,
                 )
             ),
+            vol.Optional(
+                CONF_STT_HOME_CONTEXT,
+                default=opts.get(
+                    CONF_STT_HOME_CONTEXT, DEFAULT_STT_HOME_CONTEXT
+                ),
+            ): BooleanSelector(),
             vol.Optional(
                 CONF_TTS_MODEL,
                 default=opts.get(CONF_TTS_MODEL, DEFAULT_TTS_MODEL),

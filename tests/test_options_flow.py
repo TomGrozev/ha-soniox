@@ -17,6 +17,7 @@ from custom_components.soniox.const import (
     CONF_MAX_ENDPOINT_DELAY_MS,
     CONF_REGION,
     CONF_STT_ASYNC_MODEL,
+    CONF_STT_HOME_CONTEXT,
     CONF_STT_MODEL,
     CONF_TTS_AUDIO_FORMAT,
     CONF_TTS_LANGUAGE,
@@ -87,6 +88,15 @@ def _speed_selector(result: dict):
 
 def _number_selector(result: dict, key: str):
     """Return (field, selector) of a numeric options-schema entry."""
+    return next(
+        (marker, sel)
+        for marker, sel in result["data_schema"].schema.items()
+        if marker.schema == key
+    )
+
+
+def _boolean_selector(result: dict, key: str):
+    """Return (field, selector) of a boolean options-schema entry."""
     return next(
         (marker, sel)
         for marker, sel in result["data_schema"].schema.items()
@@ -382,3 +392,61 @@ async def test_options_endpoint_values_persist_as_ints(hass, aioclient_mock):
     assert updated.options[CONF_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL] == 2
     assert isinstance(updated.options[CONF_MAX_ENDPOINT_DELAY_MS], int)
     assert isinstance(updated.options[CONF_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL], int)
+
+
+async def test_options_home_context_boolean_default_off(hass, aioclient_mock):
+    """The home-context opt-in renders as a boolean that defaults to off."""
+    _mock_catalog(aioclient_mock)
+    entry = _entry(hass)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+
+    assert result["type"] == "form"
+    field, selector = _boolean_selector(result, CONF_STT_HOME_CONTEXT)
+    assert field.default() is False
+    assert selector.selector_type == "boolean"
+
+
+async def test_options_home_context_persists_when_enabled(hass, aioclient_mock):
+    """Saving the home-context opt-in as True stores True in the options."""
+    _mock_catalog(aioclient_mock)
+    entry = _entry(hass)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert result["type"] == "form"
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {
+            CONF_STT_MODEL: "stt-rt-v6",
+            CONF_STT_ASYNC_MODEL: "stt-async-v6",
+            CONF_STT_HOME_CONTEXT: True,
+            CONF_TTS_MODEL: "tts-rt-v2",
+            CONF_TTS_VOICE: "Maya",
+            CONF_TTS_LANGUAGE: "en",
+            CONF_TTS_AUDIO_FORMAT: "mp3",
+            CONF_TTS_SAMPLE_RATE: "24000",
+        },
+    )
+
+    assert result["type"] == "create_entry"
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert updated.options[CONF_STT_HOME_CONTEXT] is True
+
+
+async def test_options_home_context_field_without_catalog(hass, aioclient_mock):
+    """The home-context opt-in is not catalog-dependent and survives a failure."""
+    aioclient_mock.get(
+        endpoints_for_region(REGION_US).tts_models_url,
+        status=500,
+        text="boom",
+        headers={"Content-Type": "application/json"},
+    )
+    entry = _entry(hass)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+
+    assert result["errors"] == {"base": "cannot_connect"}
+    field, selector = _boolean_selector(result, CONF_STT_HOME_CONTEXT)
+    assert field.default() is False
+    assert selector.selector_type == "boolean"

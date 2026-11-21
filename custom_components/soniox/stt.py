@@ -13,6 +13,9 @@ from typing import Literal
 
 import aiohttp
 
+from homeassistant.components.homeassistant.exposed_entities import (
+    async_should_expose,
+)
 from homeassistant.components.stt import (
     AudioBitRates,
     AudioChannels,
@@ -25,6 +28,9 @@ from homeassistant.components.stt import (
     SpeechToTextEntity,
 )
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import area_registry as ar
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import floor_registry as fr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
@@ -36,11 +42,13 @@ from .const import (
     CONF_MAX_ENDPOINT_DELAY_MS,
     CONF_REGION,
     CONF_STT_ASYNC_MODEL,
+    CONF_STT_HOME_CONTEXT,
     CONF_STT_MODEL,
     DEFAULT_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL,
     DEFAULT_MAX_ENDPOINT_DELAY_MS,
     DEFAULT_REGION,
     DEFAULT_STT_ASYNC_MODEL,
+    DEFAULT_STT_HOME_CONTEXT,
     DEFAULT_STT_MODEL,
     DOMAIN,
     REGION_LABELS,
@@ -58,6 +66,9 @@ _ASYNC_TIMEOUT = 90
 # ending. Ten seconds tolerates a slow link while still ending a stalled
 # Assist turn instead of waiting on a socket that never sends `finished`.
 _REALTIME_FINALIZE_TIMEOUT = 10.0
+# Soniox rejects a context over 8,000 tokens (~10,000 characters)
+# (https://docs.soniox.com/stt/concepts/context).
+_CONTEXT_TERMS_MAX_CHARS = 10_000
 _CONTROL_TOKENS = frozenset({"<end>", "<fin>"})
 # Soniox control markers, not speech: <end> marks an endpoint-detected
 # segment boundary (https://soniox.com/docs/stt/rt/endpoint-detection) and
@@ -78,6 +89,50 @@ def _transcript_latency_ms(
     if speech_end_ms is None:
         return max(round(elapsed_ms - last_audio_ms), 0)
     return max(round(elapsed_ms - speech_end_ms), 0)
+
+
+def _home_context_terms(hass: HomeAssistant) -> list[str]:
+    """Return home names to send as Soniox context terms.
+
+    The caller sends them only when the user opted in, because the terms
+    carry home data to Soniox.
+    """
+    entity_registry = er.async_get(hass)
+    # Areas and floors go first: a large home can spend the whole character
+    # budget on entity names, and the short area/floor names help every command.
+    candidates: list[object] = [
+        area.name for area in ar.async_get(hass).async_list_areas()
+    ]
+    candidates.extend(floor.name for floor in fr.async_get(hass).async_list_floors())
+    for state in hass.states.async_all():
+        if not async_should_expose(hass, "conversation", state.entity_id):
+            continue
+        candidates.append(state.name)
+        if entry := entity_registry.async_get(state.entity_id):
+            candidates.extend(entry.aliases)
+
+    terms: list[str] = []
+    seen: set[str] = set()
+    total_chars = 0
+    for candidate in candidates:
+        # Current Home Assistant stores a non-string sentinel in aliases to
+        # mark the computed entity name; there is no text to send for it.
+        if not isinstance(candidate, str):
+            continue
+        name = candidate.strip()
+        if not name:
+            continue
+        key = name.casefold()
+        if key in seen:
+            continue
+        # +2 is a conservative allowance for the punctuation between terms.
+        added_chars = len(name) + 2 if terms else len(name)
+        if total_chars + added_chars > _CONTEXT_TERMS_MAX_CHARS:
+            continue
+        seen.add(key)
+        terms.append(name)
+        total_chars += added_chars
+    return terms
 
 
 async def async_setup_entry(
@@ -204,6 +259,12 @@ class SonioxSTTEntity(SpeechToTextEntity):
                 )
             ),
         }
+        if self._entry.options.get(
+            CONF_STT_HOME_CONTEXT, DEFAULT_STT_HOME_CONTEXT
+        ):
+            terms = _home_context_terms(self.hass)
+            if terms:
+                config_msg["context"] = {"terms": terms}
 
         session = async_get_clientsession(self.hass)
         try:

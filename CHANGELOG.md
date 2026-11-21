@@ -11,6 +11,10 @@
   logging on, each realtime STT session logs the time from the last audio
   chunk to the transcript as `Soniox STT transcript … ms after the last audio
   chunk (endpoint detected)` or `(audio stream ended)`.
+- Realtime STT can now send the names and aliases of entities exposed to
+  Assist, plus area and floor names, to Soniox as context terms so commands
+  such as "turn on the kitchen lights" recognise them. The `stt_home_context`
+  option is off by default because it sends home data to Soniox.
 
 ### Changed
 
