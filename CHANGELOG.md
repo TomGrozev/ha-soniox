@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.1 (2026-11-21)
+
+### Fixed
+
+- The integration manifest no longer carries an unrecognised `homeassistant`
+  key, which made hassfest reject the repository. The minimum Home Assistant
+  version stays declared in `hacs.json`.
+
 ## 0.3.0 (2026-11-21)
 
 > This repository is Tom Grozev's fork of
