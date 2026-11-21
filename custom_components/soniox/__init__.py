@@ -8,9 +8,12 @@ from dataclasses import dataclass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .catalog import (
+    CatalogAuthError,
+    CatalogFetchError,
     SonioxCatalog,
     SttLanguagesByModel,
     async_fetch_catalog,
@@ -75,16 +78,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: SonioxConfigEntry) -> bo
         entry.data.get(CONF_REGION, DEFAULT_REGION)
     )
     session = async_get_clientsession(hass)
-    catalog = await async_fetch_catalog(
-        session,
-        endpoints,
-        entry.data[CONF_API_KEY],
-    )
-    stt_languages = await async_fetch_stt_languages(
-        session,
-        endpoints,
-        entry.data[CONF_API_KEY],
-    )
+    try:
+        catalog = await async_fetch_catalog(
+            session,
+            endpoints,
+            entry.data[CONF_API_KEY],
+        )
+        stt_languages = await async_fetch_stt_languages(
+            session,
+            endpoints,
+            entry.data[CONF_API_KEY],
+        )
+    except CatalogAuthError as err:
+        raise ConfigEntryAuthFailed(str(err)) from err
+    except CatalogFetchError as err:
+        raise ConfigEntryNotReady(
+            f"Could not fetch the Soniox catalog: {err}"
+        ) from err
     entry.runtime_data = SonioxRuntimeData(
         endpoints=endpoints,
         catalog=catalog,

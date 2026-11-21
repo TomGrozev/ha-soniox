@@ -15,6 +15,13 @@
           "api_key": "API key",
           "region": "Regional endpoint"
         }
+      },
+      "reauth_confirm": {
+        "title": "Update Soniox API key",
+        "description": "The API key ending in {key_suffix} was rejected by Soniox. Enter a new key for the same regional endpoint.",
+        "data": {
+          "api_key": "API key"
+        }
       }
     },
     "error": {
@@ -23,7 +30,8 @@
     },
     "abort": {
       "already_configured": "This Soniox account is already configured.",
-      "reconfigure_successful": "Soniox credentials updated."
+      "reconfigure_successful": "Soniox credentials updated.",
+      "reauth_successful": "Soniox API key updated."
     }
   },
   "options": {

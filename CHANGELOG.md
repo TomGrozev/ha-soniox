@@ -31,6 +31,8 @@
 - The TTS model dropdown no longer offers `tts-rt-v1`, which Soniox removed
   on August 31, 2026. Entries still saved on it keep working and are not
   changed.
+- Setup now fetches the TTS model and voice catalogs concurrently, so a
+  restart costs one round trip instead of two.
 
 ### Fixed
 
@@ -48,3 +50,8 @@
   arrives faster stays on one stream. With debug logging on, each early end
   logs `text paused at a sentence end; text_end on stream …`, and the
   `first audio frame … after first text` line shows the shorter wait.
+- When Soniox is unreachable at startup, setup now asks Home Assistant to
+  retry instead of leaving STT and TTS unavailable until the user reloads the
+  integration. Once Soniox answers, the scheduled retry loads the entry.
+- A 401 from Soniox at setup now starts a reauthentication flow, so the user
+  can enter a new API key without removing and re-adding the entry.

@@ -153,6 +153,16 @@ def _entry_title(region: str) -> str:
     return f"Soniox ({label})"
 
 
+def _key_suffix(api_key: str) -> str:
+    """Return a short, non-secret tail of an API key for display and ids."""
+    return api_key[-8:]
+
+
+def _unique_id(region: str, api_key: str) -> str:
+    """Identify an entry by its region and key tail, never by the full key."""
+    return f"{region}:{_key_suffix(api_key)}"
+
+
 async def _validate_api_key(
     session: aiohttp.ClientSession, api_key: str, region: str
 ) -> str | None:
@@ -195,7 +205,7 @@ class SonioxConfigFlow(ConfigFlow, domain=DOMAIN):
                 errors["base"] = error
             else:
                 await self.async_set_unique_id(
-                    f"{user_input[CONF_REGION]}:{user_input[CONF_API_KEY][-8:]}"
+                    _unique_id(user_input[CONF_REGION], user_input[CONF_API_KEY])
                 )
                 self._abort_if_unique_id_configured()
                 return self.async_create_entry(
@@ -232,7 +242,7 @@ class SonioxConfigFlow(ConfigFlow, domain=DOMAIN):
                     data={**entry.data, **user_input},
                     title=_entry_title(user_input[CONF_REGION]),
                     unique_id=(
-                        f"{user_input[CONF_REGION]}:{user_input[CONF_API_KEY][-8:]}"
+                        _unique_id(user_input[CONF_REGION], user_input[CONF_API_KEY])
                     ),
                 )
 
@@ -241,6 +251,45 @@ class SonioxConfigFlow(ConfigFlow, domain=DOMAIN):
             data_schema=_credentials_schema(
                 region=entry.data.get(CONF_REGION, DEFAULT_REGION)
             ),
+            errors=errors,
+        )
+
+    async def async_step_reauth(
+        self, entry_data: Mapping[str, Any]
+    ) -> ConfigFlowResult:
+        """Start reauthentication after Soniox rejected the stored key."""
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Prompt for a replacement API key for the entry's region."""
+        errors: dict[str, str] = {}
+        entry = self._get_reauth_entry()
+
+        if user_input is not None:
+            session = async_get_clientsession(self.hass)
+            region = entry.data.get(CONF_REGION, DEFAULT_REGION)
+            error = await _validate_api_key(
+                session, user_input[CONF_API_KEY], region
+            )
+            if error:
+                errors["base"] = error
+            else:
+                return self.async_update_reload_and_abort(
+                    entry,
+                    data={**entry.data, CONF_API_KEY: user_input[CONF_API_KEY]},
+                    unique_id=_unique_id(region, user_input[CONF_API_KEY]),
+                )
+
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=vol.Schema({vol.Required(CONF_API_KEY): str}),
+            description_placeholders={
+                "key_suffix": _key_suffix(
+                    entry.data.get(CONF_API_KEY, "")
+                )
+            },
             errors=errors,
         )
 

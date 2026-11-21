@@ -5,11 +5,45 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+from pathlib import Path
 
 import aiohttp
 import pytest
 
+from custom_components.soniox.const import REGION_US, endpoints_for_region
+
 pytest_plugins = "pytest_homeassistant_custom_component"
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+_CATALOG_PAYLOADS = (
+    ("tts_models_url", "models_payload.json"),
+    ("voices_url", "voices_payload.json"),
+    ("stt_models_url", "stt_models_payload.json"),
+)
+
+
+@pytest.fixture
+def mock_catalog(aioclient_mock):
+    """Return a function that registers the three setup GET payloads.
+
+    Setup fetches the TTS models, the voices and the STT languages, so every
+    test that loads an entry needs all three mocked. Tests call the function
+    when they want the healthy catalog, which also lets a test start with
+    failing endpoints and register the healthy ones after ``clear_requests()``.
+    """
+    endpoints = endpoints_for_region(REGION_US)
+
+    def register():
+        for attr, fixture in _CATALOG_PAYLOADS:
+            aioclient_mock.get(
+                getattr(endpoints, attr),
+                text=(FIXTURES / fixture).read_text(encoding="utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+        return endpoints
+
+    return register
 
 
 @pytest.fixture(autouse=True)

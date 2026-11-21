@@ -6,6 +6,7 @@ integration can adapt its advertised options without hardcoding them.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, replace
 from typing import Any, Final
 
@@ -80,6 +81,10 @@ def stt_languages_for_model(
 
 class CatalogFetchError(HomeAssistantError):
     """Raised when the live catalog cannot be fetched."""
+
+
+class CatalogAuthError(CatalogFetchError):
+    """Raised when Soniox rejects the API key (HTTP 401)."""
 
 
 def _is_number(value: Any) -> bool:
@@ -271,13 +276,15 @@ async def _async_get_json(
     """GET a JSON document, raising CatalogFetchError on any failure."""
     try:
         resp = await session.get(url, headers=headers, timeout=timeout)
-    except aiohttp.ClientError as err:
+    except (aiohttp.ClientError, TimeoutError) as err:
         raise CatalogFetchError(f"Soniox request failed: {err}") from err
+    if resp.status == 401:
+        raise CatalogAuthError("Soniox rejected the API key")
     if resp.status >= 400 or resp.status < 200:
         raise CatalogFetchError(f"Soniox returned HTTP {resp.status}")
     try:
         return await resp.json()
-    except (ValueError, aiohttp.ClientError) as err:
+    except (ValueError, aiohttp.ClientError, TimeoutError) as err:
         raise CatalogFetchError("Soniox returned invalid JSON") from err
 
 
@@ -290,16 +297,24 @@ async def async_fetch_catalog(
 ) -> SonioxCatalog:
     """Fetch the live TTS catalog (models + custom voices) from Soniox."""
     headers = {"Authorization": f"Bearer {api_key}"}
-    models_payload = await _async_get_json(
-        session, endpoints.tts_models_url, headers, timeout
+    results = await asyncio.gather(
+        _async_get_json(session, endpoints.tts_models_url, headers, timeout),
+        _async_get_json(session, endpoints.voices_url, headers, timeout),
+        return_exceptions=True,
     )
+    # A rejected key must reach setup as CatalogAuthError even when the other
+    # request failed differently, or the reauthentication flow never starts.
+    for result in results:
+        if isinstance(result, CatalogAuthError):
+            raise result
+    for result in results:
+        if isinstance(result, BaseException):
+            raise result
+    models_payload, voices_payload = results
     if not isinstance(models_payload, dict):
         raise CatalogFetchError(
             "Soniox catalog models payload was not a JSON object"
         )
-    voices_payload = await _async_get_json(
-        session, endpoints.voices_url, headers, timeout
-    )
     if not isinstance(voices_payload, dict):
         raise CatalogFetchError(
             "Soniox catalog voices payload was not a JSON object"

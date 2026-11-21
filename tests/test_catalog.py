@@ -7,19 +7,24 @@ are expected to fail on import (the RED state of this TDD slice).
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
+import aiohttp
 import pytest
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from custom_components.soniox.catalog import (
     DEFAULT_SPEED_MAX,
     DEFAULT_SPEED_MIN,
+    CatalogAuthError,
     CatalogFetchError,
     CatalogModel,
     CatalogVoice,
     SonioxCatalog,
+    async_fetch_catalog,
     parse_catalog,
 )
 from custom_components.soniox.const import (
@@ -392,3 +397,149 @@ def test_unknown_region_falls_back_to_default():
 
 def test_catalog_fetch_error_is_homeassistant_error():
     assert issubclass(CatalogFetchError, HomeAssistantError)
+
+
+def _mock_json(aioclient_mock, url: str, payload) -> None:
+    aioclient_mock.get(
+        url,
+        text=json.dumps(payload),
+        headers={"Content-Type": "application/json"},
+    )
+
+
+async def test_401_from_models_url_raises_catalog_auth_error(hass, aioclient_mock):
+    endpoints = endpoints_for_region("us")
+    aioclient_mock.get(
+        endpoints.tts_models_url, status=401, text="unauthorized"
+    )
+    _mock_json(aioclient_mock, endpoints.voices_url, _load("voices_payload.json"))
+
+    with pytest.raises(CatalogAuthError):
+        await async_fetch_catalog(
+            async_get_clientsession(hass), endpoints, "bad-key"
+        )
+
+
+async def test_401_from_voices_url_raises_catalog_auth_error(hass, aioclient_mock):
+    endpoints = endpoints_for_region("us")
+    _mock_json(aioclient_mock, endpoints.tts_models_url, _load("models_payload.json"))
+    aioclient_mock.get(endpoints.voices_url, status=401, text="unauthorized")
+
+    with pytest.raises(CatalogAuthError):
+        await async_fetch_catalog(
+            async_get_clientsession(hass), endpoints, "bad-key"
+        )
+
+
+async def test_500_raises_plain_catalog_fetch_error(hass, aioclient_mock):
+    endpoints = endpoints_for_region("us")
+    aioclient_mock.get(endpoints.tts_models_url, status=500, text="boom")
+    _mock_json(aioclient_mock, endpoints.voices_url, _load("voices_payload.json"))
+
+    with pytest.raises(CatalogFetchError) as excinfo:
+        await async_fetch_catalog(
+            async_get_clientsession(hass), endpoints, "test-key"
+        )
+    assert not isinstance(excinfo.value, CatalogAuthError)
+
+
+async def test_connection_error_raises_plain_catalog_fetch_error(
+    hass, aioclient_mock
+):
+    endpoints = endpoints_for_region("us")
+    aioclient_mock.get(
+        endpoints.tts_models_url,
+        exc=aiohttp.ClientConnectionError("network down"),
+    )
+    _mock_json(aioclient_mock, endpoints.voices_url, _load("voices_payload.json"))
+
+    with pytest.raises(CatalogFetchError) as excinfo:
+        await async_fetch_catalog(
+            async_get_clientsession(hass), endpoints, "test-key"
+        )
+    assert not isinstance(excinfo.value, CatalogAuthError)
+
+
+async def test_invalid_json_raises_plain_catalog_fetch_error(hass, aioclient_mock):
+    endpoints = endpoints_for_region("us")
+    aioclient_mock.get(
+        endpoints.tts_models_url,
+        text="not json",
+        headers={"Content-Type": "application/json"},
+    )
+    _mock_json(aioclient_mock, endpoints.voices_url, _load("voices_payload.json"))
+
+    with pytest.raises(CatalogFetchError) as excinfo:
+        await async_fetch_catalog(
+            async_get_clientsession(hass), endpoints, "test-key"
+        )
+    assert not isinstance(excinfo.value, CatalogAuthError)
+
+
+async def test_timeout_raises_plain_catalog_fetch_error(hass, aioclient_mock):
+    endpoints = endpoints_for_region("us")
+    aioclient_mock.get(endpoints.tts_models_url, exc=TimeoutError("slow"))
+    _mock_json(aioclient_mock, endpoints.voices_url, _load("voices_payload.json"))
+
+    with pytest.raises(CatalogFetchError) as excinfo:
+        await async_fetch_catalog(
+            async_get_clientsession(hass), endpoints, "test-key"
+        )
+    assert not isinstance(excinfo.value, CatalogAuthError)
+
+
+async def test_rejected_key_wins_when_the_other_request_fails(
+    hass, aioclient_mock
+):
+    """A 401 on one endpoint must start reauth even if the other is down."""
+    endpoints = endpoints_for_region("us")
+    aioclient_mock.get(endpoints.tts_models_url, status=401, text="unauthorized")
+    aioclient_mock.get(endpoints.voices_url, status=500, text="boom")
+
+    with pytest.raises(CatalogAuthError):
+        await async_fetch_catalog(
+            async_get_clientsession(hass), endpoints, "test-key"
+        )
+
+
+class _FakeResponse:
+    def __init__(self, payload) -> None:
+        self.status = 200
+        self._payload = payload
+
+    async def json(self):
+        return self._payload
+
+
+class _BarrierSession:
+    """Session whose GETs complete only once both requests are in flight."""
+
+    def __init__(self, payloads: dict[str, object]) -> None:
+        self._payloads = payloads
+        self.requested: list[str] = []
+        self._barrier = asyncio.Barrier(2)
+
+    async def get(self, url: str, *, headers=None, timeout=None):
+        self.requested.append(url)
+        await self._barrier.wait()
+        return _FakeResponse(self._payloads[url])
+
+
+async def test_catalog_payloads_are_fetched_concurrently():
+    endpoints = endpoints_for_region("us")
+    session = _BarrierSession(
+        {
+            endpoints.tts_models_url: _load("models_payload.json"),
+            endpoints.voices_url: _load("voices_payload.json"),
+        }
+    )
+
+    catalog = await asyncio.wait_for(
+        async_fetch_catalog(session, endpoints, "test-key"), timeout=2
+    )
+
+    assert set(session.requested) == {
+        endpoints.tts_models_url,
+        endpoints.voices_url,
+    }
+    assert "tts-rt-v2" in catalog.models
