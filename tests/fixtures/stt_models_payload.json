@@ -1,0 +1,27 @@
+{
+  "models": [
+    {
+      "id": "stt-rt-v6",
+      "aliased_model_id": null,
+      "name": "Speech to Text v6 (realtime)",
+      "transcription_mode": "real_time",
+      "languages": [
+        { "code": "en", "name": "English" },
+        { "code": "de", "name": "German" },
+        { "code": "ja", "name": "Japanese" }
+      ],
+      "supports_timestamps": true
+    },
+    {
+      "id": "stt-async-v6",
+      "aliased_model_id": null,
+      "name": "Speech to Text v6 (async)",
+      "transcription_mode": "async",
+      "languages": [
+        { "code": "en", "name": "English" },
+        { "code": "es", "name": "Spanish" }
+      ],
+      "supports_timestamps": true
+    }
+  ]
+}

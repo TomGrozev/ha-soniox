@@ -36,6 +36,11 @@ def _mock_catalog(aioclient_mock):
         text=_load_fixture("voices_payload.json"),
         headers={"Content-Type": "application/json"},
     )
+    aioclient_mock.get(
+        endpoints.stt_models_url,
+        text=_load_fixture("stt_models_payload.json"),
+        headers={"Content-Type": "application/json"},
+    )
     return endpoints
 
 
@@ -79,12 +84,13 @@ async def test_config_entry_setup_and_unload(hass, aioclient_mock):
     )
 
     # Flow-validation GET /v1/tts-models, plus setup's catalog fetch which
-    # hits /v1/tts-models then /v1/voices.
-    assert len(aioclient_mock.mock_calls) == 3, aioclient_mock.mock_calls
+    # hits /v1/tts-models then /v1/voices then /v1/models for STT languages.
+    assert len(aioclient_mock.mock_calls) == 4, aioclient_mock.mock_calls
     assert _call_urls(aioclient_mock) == [
         ("GET", endpoints.tts_models_url),
         ("GET", endpoints.tts_models_url),
         ("GET", endpoints.voices_url),
+        ("GET", endpoints.stt_models_url),
     ]
 
     # Unload.
@@ -110,12 +116,14 @@ async def test_setup_fetches_catalog(hass, aioclient_mock):
     assert isinstance(entry.runtime_data, SonioxRuntimeData)
     assert entry.runtime_data.endpoints.region == REGION_US
     assert "tts-rt-v2" in entry.runtime_data.catalog.models
+    assert "stt-rt-v6" in entry.runtime_data.stt_languages
 
-    # Setup fetch = exactly the models GET then the voices GET.
-    assert len(aioclient_mock.mock_calls) == 2, aioclient_mock.mock_calls
+    # Setup fetch = TTS models and voices, then the STT models for languages.
+    assert len(aioclient_mock.mock_calls) == 3, aioclient_mock.mock_calls
     assert _call_urls(aioclient_mock) == [
         ("GET", endpoints.tts_models_url),
         ("GET", endpoints.voices_url),
+        ("GET", endpoints.stt_models_url),
     ]
 
 

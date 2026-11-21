@@ -36,23 +36,27 @@ from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import SonioxConfigEntry
+from .catalog import stt_languages_for_model
 from .const import (
     CONF_API_KEY,
     CONF_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL,
     CONF_MAX_ENDPOINT_DELAY_MS,
     CONF_REGION,
     CONF_STT_ASYNC_MODEL,
+    CONF_STT_EXTRA_LANGUAGES,
     CONF_STT_HOME_CONTEXT,
+    CONF_STT_LANGUAGE_IDENTIFICATION,
     CONF_STT_MODEL,
     DEFAULT_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL,
     DEFAULT_MAX_ENDPOINT_DELAY_MS,
     DEFAULT_REGION,
     DEFAULT_STT_ASYNC_MODEL,
+    DEFAULT_STT_EXTRA_LANGUAGES,
     DEFAULT_STT_HOME_CONTEXT,
+    DEFAULT_STT_LANGUAGE_IDENTIFICATION,
     DEFAULT_STT_MODEL,
     DOMAIN,
     REGION_LABELS,
-    SUPPORTED_LANGUAGES,
     is_async_stt_model,
 )
 
@@ -178,7 +182,42 @@ class SonioxSTTEntity(SpeechToTextEntity):
 
     @property
     def supported_languages(self) -> list[str]:
-        return SUPPORTED_LANGUAGES
+        return [
+            language.code
+            for language in stt_languages_for_model(
+                self._entry.runtime_data.stt_languages, self._selected_model()
+            )
+        ]
+
+    def _apply_language_options(
+        self, request: dict[str, object], model: str, language: str
+    ) -> None:
+        """Send the pipeline language first, then the saved extra hints.
+
+        Extras are restricted to the languages the selected model reports and
+        deduped, so a stale saved option cannot send a hint Soniox rejects.
+        Absence of the identification flag means off for Soniox, so only
+        opt-in users send it.
+        """
+        allowed = {
+            entry.code
+            for entry in stt_languages_for_model(
+                self._entry.runtime_data.stt_languages, model
+            )
+        }
+        hints = [language]
+        for extra in self._entry.options.get(
+            CONF_STT_EXTRA_LANGUAGES, DEFAULT_STT_EXTRA_LANGUAGES
+        ):
+            if extra not in allowed or extra in hints:
+                continue
+            hints.append(extra)
+        request["language_hints"] = hints
+        if self._entry.options.get(
+            CONF_STT_LANGUAGE_IDENTIFICATION,
+            DEFAULT_STT_LANGUAGE_IDENTIFICATION,
+        ):
+            request["enable_language_identification"] = True
 
     @property
     def supported_formats(self) -> list[AudioFormats]:
@@ -245,7 +284,6 @@ class SonioxSTTEntity(SpeechToTextEntity):
             "audio_format": _AUDIO_FORMAT,
             "sample_rate": int(metadata.sample_rate),
             "num_channels": int(metadata.channel),
-            "language_hints": [language],
             "enable_endpoint_detection": True,
             "max_endpoint_delay_ms": int(
                 self._entry.options.get(
@@ -259,6 +297,7 @@ class SonioxSTTEntity(SpeechToTextEntity):
                 )
             ),
         }
+        self._apply_language_options(config_msg, model, language)
         if self._entry.options.get(
             CONF_STT_HOME_CONTEXT, DEFAULT_STT_HOME_CONTEXT
         ):
@@ -495,12 +534,12 @@ class SonioxSTTEntity(SpeechToTextEntity):
         file_id: str,
         language: str,
     ) -> str:
-        body = {
+        body: dict[str, object] = {
             "model": model,
             "file_id": file_id,
-            "language_hints": [language],
             "client_reference_id": "home-assistant",
         }
+        self._apply_language_options(body, model, language)
         async with session.post(
             self._entry.runtime_data.endpoints.stt_transcriptions_url,
             json=body,

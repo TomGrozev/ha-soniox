@@ -7,6 +7,7 @@ round-trips saved options.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -17,7 +18,9 @@ from custom_components.soniox.const import (
     CONF_MAX_ENDPOINT_DELAY_MS,
     CONF_REGION,
     CONF_STT_ASYNC_MODEL,
+    CONF_STT_EXTRA_LANGUAGES,
     CONF_STT_HOME_CONTEXT,
+    CONF_STT_LANGUAGE_IDENTIFICATION,
     CONF_STT_MODEL,
     CONF_TTS_AUDIO_FORMAT,
     CONF_TTS_LANGUAGE,
@@ -56,6 +59,17 @@ def _mock_catalog(aioclient_mock):
     return endpoints
 
 
+def _mock_stt_models(aioclient_mock):
+    """Mock GET /v1/models so a loaded entry has per-model STT languages."""
+    endpoints = endpoints_for_region(REGION_US)
+    aioclient_mock.get(
+        endpoints.stt_models_url,
+        text=_load_fixture("stt_models_payload.json"),
+        headers={"Content-Type": "application/json"},
+    )
+    return endpoints
+
+
 def _voice_options(result: dict):
     """Return the {value: label} mapping of the TTS voice selector."""
     _, selector = next(
@@ -75,6 +89,32 @@ def _entry(hass, *, options: dict | None = None) -> MockConfigEntry:
     )
     entry.add_to_hass(hass)
     return entry
+
+
+async def _loaded_entry(hass, aioclient_mock, *, options: dict | None = None):
+    """Set up an entry so runtime_data carries the API STT languages."""
+    _mock_catalog(aioclient_mock)
+    _mock_stt_models(aioclient_mock)
+    entry = _entry(hass, options=options)
+    assert await hass.config_entries.async_setup(entry.entry_id) is True
+    await hass.async_block_till_done()
+    return entry
+
+
+def _selector(result: dict, key: str):
+    """Return (field, selector) of an options-schema entry."""
+    return next(
+        (marker, sel)
+        for marker, sel in result["data_schema"].schema.items()
+        if marker.schema == key
+    )
+
+
+def _select_options(selector) -> dict[str, str]:
+    """Return the {value: label} mapping of a select selector."""
+    return {
+        option["value"]: option["label"] for option in selector.config["options"]
+    }
 
 
 def _speed_selector(result: dict):
@@ -450,3 +490,267 @@ async def test_options_home_context_field_without_catalog(hass, aioclient_mock):
     field, selector = _boolean_selector(result, CONF_STT_HOME_CONTEXT)
     assert field.default() is False
     assert selector.selector_type == "boolean"
+
+
+async def test_options_extra_languages_union_of_selected_models(
+    hass, aioclient_mock
+):
+    """The multi-select offers exactly the two models' API language union."""
+    entry = await _loaded_entry(hass, aioclient_mock)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+
+    assert result["type"] == "form"
+    assert result["errors"] == {}
+
+    field, selector = _selector(result, CONF_STT_EXTRA_LANGUAGES)
+    assert field.default() == []
+    assert selector.selector_type == "select"
+    assert selector.config["multiple"] is True
+    assert selector.config["mode"] == "dropdown"
+
+    # stt-rt-v6 first, then stt-async-v6's new languages; "en" is shared.
+    assert [option["value"] for option in selector.config["options"]] == [
+        "en",
+        "de",
+        "ja",
+        "es",
+    ]
+    assert _select_options(selector) == {
+        "en": "English (en)",
+        "de": "German (de)",
+        "ja": "Japanese (ja)",
+        "es": "Spanish (es)",
+    }
+
+
+async def test_options_extra_languages_render_saved_values(hass, aioclient_mock):
+    """A saved hint list and identification flag render as their saved values."""
+    entry = await _loaded_entry(
+        hass,
+        aioclient_mock,
+        options={
+            CONF_STT_EXTRA_LANGUAGES: ["de", "ja"],
+            CONF_STT_LANGUAGE_IDENTIFICATION: True,
+        },
+    )
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+
+    field, _ = _selector(result, CONF_STT_EXTRA_LANGUAGES)
+    assert field.default() == ["de", "ja"]
+    ident_field, ident_selector = _selector(
+        result, CONF_STT_LANGUAGE_IDENTIFICATION
+    )
+    assert ident_field.default() is True
+    assert ident_selector.selector_type == "boolean"
+
+
+async def test_options_extra_languages_saved_code_missing_from_api(
+    hass, aioclient_mock
+):
+    """A saved code the live list dropped stays a selectable, savable option."""
+    entry = await _loaded_entry(
+        hass, aioclient_mock, options={CONF_STT_EXTRA_LANGUAGES: ["xx"]}
+    )
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+
+    field, selector = _selector(result, CONF_STT_EXTRA_LANGUAGES)
+    assert field.default() == ["xx"]
+    assert _select_options(selector)["xx"] == "xx"
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {
+            CONF_STT_MODEL: "stt-rt-v6",
+            CONF_STT_ASYNC_MODEL: "stt-async-v6",
+            CONF_STT_EXTRA_LANGUAGES: ["xx"],
+            CONF_STT_LANGUAGE_IDENTIFICATION: False,
+            CONF_TTS_MODEL: "tts-rt-v2",
+            CONF_TTS_VOICE: "Maya",
+            CONF_TTS_LANGUAGE: "en",
+            CONF_TTS_AUDIO_FORMAT: "mp3",
+            CONF_TTS_SAMPLE_RATE: "24000",
+        },
+    )
+
+    assert result["type"] == "create_entry"
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert updated.options[CONF_STT_EXTRA_LANGUAGES] == ["xx"]
+    await hass.async_block_till_done()
+
+
+async def test_options_extra_languages_save_dedupes_and_keeps_order(
+    hass, aioclient_mock
+):
+    """Saving stores a deduped, order-preserving list and a real bool."""
+    entry = await _loaded_entry(hass, aioclient_mock)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert result["type"] == "form"
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {
+            CONF_STT_MODEL: "stt-rt-v6",
+            CONF_STT_ASYNC_MODEL: "stt-async-v6",
+            CONF_STT_EXTRA_LANGUAGES: ["de", "de", "ja", "de"],
+            CONF_STT_LANGUAGE_IDENTIFICATION: True,
+            CONF_TTS_MODEL: "tts-rt-v2",
+            CONF_TTS_VOICE: "Maya",
+            CONF_TTS_LANGUAGE: "en",
+            CONF_TTS_AUDIO_FORMAT: "mp3",
+            CONF_TTS_SAMPLE_RATE: "24000",
+        },
+    )
+
+    assert result["type"] == "create_entry"
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert updated.options[CONF_STT_EXTRA_LANGUAGES] == ["de", "ja"]
+    assert updated.options[CONF_STT_LANGUAGE_IDENTIFICATION] is True
+    await hass.async_block_till_done()
+
+
+async def test_options_identification_default_off(hass, aioclient_mock):
+    """Language identification is an opt-in boolean that defaults to off."""
+    _mock_catalog(aioclient_mock)
+    entry = _entry(hass)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+
+    assert result["type"] == "form"
+    field, selector = _selector(result, CONF_STT_LANGUAGE_IDENTIFICATION)
+    assert field.default() is False
+    assert selector.selector_type == "boolean"
+
+
+async def test_options_identification_persists_when_enabled(
+    hass, aioclient_mock
+):
+    """Saving identification as on stores True in the options."""
+    _mock_catalog(aioclient_mock)
+    entry = _entry(hass)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert result["type"] == "form"
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {
+            CONF_STT_MODEL: "stt-rt-v6",
+            CONF_STT_ASYNC_MODEL: "stt-async-v6",
+            CONF_STT_EXTRA_LANGUAGES: [],
+            CONF_STT_LANGUAGE_IDENTIFICATION: True,
+            CONF_TTS_MODEL: "tts-rt-v2",
+            CONF_TTS_VOICE: "Maya",
+            CONF_TTS_LANGUAGE: "en",
+            CONF_TTS_AUDIO_FORMAT: "mp3",
+            CONF_TTS_SAMPLE_RATE: "24000",
+        },
+    )
+
+    assert result["type"] == "create_entry"
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert updated.options[CONF_STT_LANGUAGE_IDENTIFICATION] is True
+
+
+async def test_options_missing_stt_language_fields_keep_saved_values(
+    hass, aioclient_mock
+):
+    """A form payload without the STT language fields keeps the saved values."""
+    _mock_catalog(aioclient_mock)
+    entry = _entry(
+        hass,
+        options={
+            CONF_STT_EXTRA_LANGUAGES: ["es", "de"],
+            CONF_STT_LANGUAGE_IDENTIFICATION: True,
+        },
+    )
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert result["type"] == "form"
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {
+            CONF_STT_MODEL: "stt-rt-v6",
+            CONF_STT_ASYNC_MODEL: "stt-async-v6",
+            CONF_TTS_MODEL: "tts-rt-v2",
+            CONF_TTS_VOICE: "Maya",
+            CONF_TTS_LANGUAGE: "en",
+            CONF_TTS_AUDIO_FORMAT: "mp3",
+            CONF_TTS_SAMPLE_RATE: "24000",
+        },
+    )
+
+    assert result["type"] == "create_entry"
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert updated.options[CONF_STT_EXTRA_LANGUAGES] == ["es", "de"]
+    assert updated.options[CONF_STT_LANGUAGE_IDENTIFICATION] is True
+
+
+async def test_options_extra_languages_fall_back_without_runtime_data(
+    hass, aioclient_mock
+):
+    """Before setup (no runtime_data) the curated list keeps the form usable."""
+    _mock_catalog(aioclient_mock)
+    entry = _entry(hass, options={CONF_STT_EXTRA_LANGUAGES: ["de"]})
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+
+    assert result["type"] == "form"
+    field, selector = _selector(result, CONF_STT_EXTRA_LANGUAGES)
+    assert field.default() == ["de"]
+    assert "de" in _select_options(selector)
+    assert "unknown-code" not in _select_options(selector)
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {
+            CONF_STT_MODEL: "stt-rt-v6",
+            CONF_STT_ASYNC_MODEL: "stt-async-v6",
+            CONF_STT_EXTRA_LANGUAGES: ["de"],
+            CONF_STT_LANGUAGE_IDENTIFICATION: False,
+            CONF_TTS_MODEL: "tts-rt-v2",
+            CONF_TTS_VOICE: "Maya",
+            CONF_TTS_LANGUAGE: "en",
+            CONF_TTS_AUDIO_FORMAT: "mp3",
+            CONF_TTS_SAMPLE_RATE: "24000",
+        },
+    )
+
+    assert result["type"] == "create_entry"
+
+
+async def test_options_stt_fields_group_in_order(hass, aioclient_mock):
+    """STT fields form one group in model → languages → endpoint → home order."""
+    _mock_catalog(aioclient_mock)
+    entry = _entry(hass)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+
+    keys = [marker.schema for marker in result["data_schema"].schema]
+    assert keys[:7] == [
+        CONF_STT_MODEL,
+        CONF_STT_ASYNC_MODEL,
+        CONF_STT_EXTRA_LANGUAGES,
+        CONF_STT_LANGUAGE_IDENTIFICATION,
+        CONF_MAX_ENDPOINT_DELAY_MS,
+        CONF_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL,
+        CONF_STT_HOME_CONTEXT,
+    ]
+    assert keys[7] == CONF_TTS_MODEL
+
+
+def test_options_strings_have_stt_language_labels():
+    """Both the source strings and the runtime translations label the options."""
+    component = Path(__file__).parent.parent / "custom_components" / "soniox"
+    for name in ("strings.json", "translations/en.json"):
+        strings = json.loads((component / name).read_text(encoding="utf-8"))
+        step = strings["options"]["step"]["init"]
+        assert step["data"][CONF_STT_EXTRA_LANGUAGES]
+        assert step["data"][CONF_STT_LANGUAGE_IDENTIFICATION]
+        assert step["data_description"][CONF_STT_EXTRA_LANGUAGES]
+        assert step["data_description"][CONF_STT_LANGUAGE_IDENTIFICATION]
+

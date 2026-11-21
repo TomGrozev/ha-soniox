@@ -70,6 +70,11 @@ def _mock_catalog(aioclient_mock):
         text=_load_fixture("voices_payload.json"),
         headers={"Content-Type": "application/json"},
     )
+    aioclient_mock.get(
+        endpoints.stt_models_url,
+        text=_load_fixture("stt_models_payload.json"),
+        headers={"Content-Type": "application/json"},
+    )
     return endpoints
 
 

@@ -14,6 +14,10 @@ CONF_STT_MODEL: Final = "stt_model"
 CONF_STT_ASYNC_MODEL: Final = "stt_async_model"
 CONF_STT_HOME_CONTEXT: Final = "stt_home_context"
 DEFAULT_STT_HOME_CONTEXT: Final = False
+CONF_STT_EXTRA_LANGUAGES: Final = "stt_extra_languages"
+DEFAULT_STT_EXTRA_LANGUAGES: Final[tuple[str, ...]] = ()
+CONF_STT_LANGUAGE_IDENTIFICATION: Final = "stt_language_identification"
+DEFAULT_STT_LANGUAGE_IDENTIFICATION: Final = False
 CONF_MAX_ENDPOINT_DELAY_MS: Final = "max_endpoint_delay_ms"
 CONF_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL: Final = "endpoint_latency_adjustment_level"
 CONF_TTS_MODEL: Final = "tts_model"
@@ -56,6 +60,7 @@ class SonioxEndpoints:
     stt_files_url: str
     stt_transcriptions_url: str
     stt_websocket_url: str
+    stt_models_url: str
     tts_websocket_url: str
     tts_models_url: str
     voices_url: str
@@ -69,6 +74,7 @@ def endpoints_for_region(region: str) -> SonioxEndpoints:
         stt_files_url=f"https://{api}/v1/files",
         stt_transcriptions_url=f"https://{api}/v1/transcriptions",
         stt_websocket_url=f"wss://{stt_rt}/transcribe-websocket",
+        stt_models_url=f"https://{api}/v1/models",
         tts_websocket_url=f"wss://{tts_rt}/tts-websocket",
         tts_models_url=f"https://{api}/v1/tts-models",
         voices_url=f"https://{api}/v1/voices",
@@ -93,10 +99,12 @@ DEFAULT_TTS_LANGUAGE: Final = "en"
 DEFAULT_TTS_AUDIO_FORMAT: Final = "mp3"
 DEFAULT_TTS_SAMPLE_RATE: Final = 24000
 
-# Curated subset of the 60+ languages Soniox advertises. Used as the
-# advertised supported_languages list for both STT and TTS — the Soniox
-# models actually handle far more codes, but Home Assistant prefers a
-# concrete list it can match assist-pipeline languages against.
+# Curated subset of the 60+ languages Soniox advertises. Used as the TTS
+# advertised supported_languages list, and as the STT fallback when the
+# selected model is absent from the live /v1/models payload (a custom model).
+# STT entities otherwise advertise the languages the API reports for their
+# model; TTS keeps this list because Home Assistant prefers a concrete list
+# it can match assist-pipeline languages against.
 SUPPORTED_LANGUAGES: Final = [
     "af", "ar", "az", "be", "bg", "bn", "bs", "ca", "cs", "cy", "da", "de",
     "el", "en", "es", "et", "eu", "fa", "fi", "fr", "gl", "gu", "he", "hi",

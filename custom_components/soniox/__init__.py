@@ -10,7 +10,12 @@ from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .catalog import SonioxCatalog, async_fetch_catalog
+from .catalog import (
+    SonioxCatalog,
+    SttLanguagesByModel,
+    async_fetch_catalog,
+    async_fetch_stt_languages,
+)
 from .const import (
     CONF_API_KEY,
     CONF_REGION,
@@ -52,7 +57,11 @@ class SonioxRuntimeData:
 
     endpoints: SonioxEndpoints
     catalog: SonioxCatalog
-    # Issue #8: warm TTS WebSocket pool — opened from STT start, reused by
+    # Issue #15: per-model STT languages from GET /v1/models, fetched once at
+    # setup beside the TTS catalog so both STT entities filter their hints and
+    # advertise their supported languages from the same live snapshot.
+    stt_languages: SttLanguagesByModel
+    # Issue #8: warm TTS WebSocket pool, opened from STT start, reused by
     # TTS requests, torn down on entry unload.
     tts_pool: SonioxTTSPool
 
@@ -65,14 +74,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: SonioxConfigEntry) -> bo
     endpoints = endpoints_for_region(
         entry.data.get(CONF_REGION, DEFAULT_REGION)
     )
+    session = async_get_clientsession(hass)
     catalog = await async_fetch_catalog(
-        async_get_clientsession(hass),
+        session,
+        endpoints,
+        entry.data[CONF_API_KEY],
+    )
+    stt_languages = await async_fetch_stt_languages(
+        session,
         endpoints,
         entry.data[CONF_API_KEY],
     )
     entry.runtime_data = SonioxRuntimeData(
         endpoints=endpoints,
         catalog=catalog,
+        stt_languages=stt_languages,
         # tts_ws_url is passed in (not read from runtime_data): the pool must
         # survive entry.runtime_data being deleted on unload (issue #8 AC6).
         tts_pool=SonioxTTSPool(hass, entry, endpoints.tts_websocket_url),

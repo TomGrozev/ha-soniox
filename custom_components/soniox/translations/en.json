@@ -34,15 +34,21 @@
         "data": {
           "stt_model": "Realtime STT model",
           "stt_async_model": "Async STT model",
-          "stt_home_context": "Send home names to Soniox (exposed entities, aliases, areas and floors)",
+          "stt_extra_languages": "Extra STT language hints (added after the pipeline language)",
+          "stt_language_identification": "Identify the spoken language with Soniox",
           "max_endpoint_delay_ms": "STT endpoint max delay (ms)",
           "endpoint_latency_adjustment_level": "STT endpoint latency adjustment level (0-3; higher ends the turn sooner)",
+          "stt_home_context": "Send home names to Soniox (exposed entities, aliases, areas and floors)",
           "tts_model": "TTS model",
           "tts_voice": "Default TTS voice",
           "tts_language": "Default TTS language",
           "tts_audio_format": "TTS audio format",
           "tts_sample_rate": "TTS sample rate (Hz, used for PCM/WAV)",
           "tts_speed": "Default speaking speed"
+        },
+        "data_description": {
+          "stt_extra_languages": "Languages Soniox should also expect. They are added after your assist pipeline's language, so the pipeline language keeps priority.",
+          "stt_language_identification": "Let Soniox detect the spoken language. Extra language hints still apply as a prior when this is on."
         }
       }
     },

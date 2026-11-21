@@ -27,14 +27,22 @@ from homeassistant.helpers.selector import (
     SelectSelectorMode,
 )
 
-from .catalog import CatalogFetchError, CatalogModel, async_fetch_catalog
+from .catalog import (
+    CatalogFetchError,
+    CatalogModel,
+    SttLanguagesByModel,
+    async_fetch_catalog,
+    stt_languages_for_model,
+)
 from .const import (
     CONF_API_KEY,
     CONF_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL,
     CONF_MAX_ENDPOINT_DELAY_MS,
     CONF_REGION,
     CONF_STT_ASYNC_MODEL,
+    CONF_STT_EXTRA_LANGUAGES,
     CONF_STT_HOME_CONTEXT,
+    CONF_STT_LANGUAGE_IDENTIFICATION,
     CONF_STT_MODEL,
     CONF_TTS_AUDIO_FORMAT,
     CONF_TTS_LANGUAGE,
@@ -46,7 +54,9 @@ from .const import (
     DEFAULT_MAX_ENDPOINT_DELAY_MS,
     DEFAULT_REGION,
     DEFAULT_STT_ASYNC_MODEL,
+    DEFAULT_STT_EXTRA_LANGUAGES,
     DEFAULT_STT_HOME_CONTEXT,
+    DEFAULT_STT_LANGUAGE_IDENTIFICATION,
     DEFAULT_STT_MODEL,
     DEFAULT_TTS_AUDIO_FORMAT,
     DEFAULT_TTS_LANGUAGE,
@@ -80,6 +90,27 @@ def _model_options(
     if current and current not in values:
         values.append(current)
     return [SelectOptionDict(value=value, label=value) for value in values]
+
+
+def _stt_language_options(
+    languages_by_model: SttLanguagesByModel,
+    *models: str,
+) -> list[SelectOptionDict]:
+    """Union of the selected models' API languages, realtime order first."""
+    options: list[SelectOptionDict] = []
+    seen: set[str] = set()
+    for model in models:
+        for language in stt_languages_for_model(languages_by_model, model):
+            if language.code in seen:
+                continue
+            seen.add(language.code)
+            label = (
+                language.code
+                if language.name == language.code
+                else f"{language.name} ({language.code})"
+            )
+            options.append(SelectOptionDict(value=language.code, label=label))
+    return options
 
 
 def _region_selector() -> SelectSelector:
@@ -248,6 +279,22 @@ class SonioxOptionsFlow(OptionsFlow):
                     CONF_TTS_SPEED, DEFAULT_TTS_SPEED
                 ),
             )
+            saved = self.config_entry.options
+            extras = user_input.get(CONF_STT_EXTRA_LANGUAGES)
+            if extras is None:
+                extras = saved.get(
+                    CONF_STT_EXTRA_LANGUAGES, DEFAULT_STT_EXTRA_LANGUAGES
+                )
+            user_input[CONF_STT_EXTRA_LANGUAGES] = list(
+                dict.fromkeys(code for code in extras if isinstance(code, str))
+            )
+            identification = user_input.get(CONF_STT_LANGUAGE_IDENTIFICATION)
+            if identification is None:
+                identification = saved.get(
+                    CONF_STT_LANGUAGE_IDENTIFICATION,
+                    DEFAULT_STT_LANGUAGE_IDENTIFICATION,
+                )
+            user_input[CONF_STT_LANGUAGE_IDENTIFICATION] = bool(identification)
             return self.async_create_entry(title="", data=user_input)
 
         opts = self.config_entry.options
@@ -315,6 +362,25 @@ class SonioxOptionsFlow(OptionsFlow):
         )
         tts_model_options = _model_options(TTS_MODELS, opts.get(CONF_TTS_MODEL))
 
+        runtime_data = getattr(self.config_entry, "runtime_data", None)
+        extra_language_options = _stt_language_options(
+            runtime_data.stt_languages if runtime_data is not None else {},
+            opts.get(CONF_STT_MODEL, DEFAULT_STT_MODEL),
+            opts.get(CONF_STT_ASYNC_MODEL, DEFAULT_STT_ASYNC_MODEL),
+        )
+        saved_extra_languages = list(
+            opts.get(CONF_STT_EXTRA_LANGUAGES, DEFAULT_STT_EXTRA_LANGUAGES)
+        )
+        # A saved hint the live list no longer offers stays selectable, so the
+        # form never rejects the user's existing configuration on save.
+        known_codes = {option["value"] for option in extra_language_options}
+        for code in saved_extra_languages:
+            if code not in known_codes:
+                known_codes.add(code)
+                extra_language_options.append(
+                    SelectOptionDict(value=code, label=code)
+                )
+
         schema_fields: dict[vol.Marker, Any] = {
             vol.Optional(
                 CONF_STT_MODEL,
@@ -324,6 +390,32 @@ class SonioxOptionsFlow(OptionsFlow):
                     options=stt_model_options, mode=SelectSelectorMode.DROPDOWN
                 )
             ),
+            vol.Optional(
+                CONF_STT_ASYNC_MODEL,
+                default=opts.get(CONF_STT_ASYNC_MODEL, DEFAULT_STT_ASYNC_MODEL),
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=stt_async_model_options,
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Optional(
+                CONF_STT_EXTRA_LANGUAGES,
+                default=saved_extra_languages,
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=extra_language_options,
+                    mode=SelectSelectorMode.DROPDOWN,
+                    multiple=True,
+                )
+            ),
+            vol.Optional(
+                CONF_STT_LANGUAGE_IDENTIFICATION,
+                default=opts.get(
+                    CONF_STT_LANGUAGE_IDENTIFICATION,
+                    DEFAULT_STT_LANGUAGE_IDENTIFICATION,
+                ),
+            ): BooleanSelector(),
             vol.Optional(
                 CONF_MAX_ENDPOINT_DELAY_MS,
                 default=opts.get(
@@ -349,15 +441,6 @@ class SonioxOptionsFlow(OptionsFlow):
                     max=3,
                     step=1,
                     mode=NumberSelectorMode.BOX,
-                )
-            ),
-            vol.Optional(
-                CONF_STT_ASYNC_MODEL,
-                default=opts.get(CONF_STT_ASYNC_MODEL, DEFAULT_STT_ASYNC_MODEL),
-            ): SelectSelector(
-                SelectSelectorConfig(
-                    options=stt_async_model_options,
-                    mode=SelectSelectorMode.DROPDOWN,
                 )
             ),
             vol.Optional(

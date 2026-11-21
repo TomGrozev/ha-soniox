@@ -13,7 +13,7 @@ import aiohttp
 
 from homeassistant.exceptions import HomeAssistantError
 
-from .const import SonioxEndpoints
+from .const import SUPPORTED_LANGUAGES, SonioxEndpoints
 
 DEFAULT_SPEED_MIN: Final = 0.7
 DEFAULT_SPEED_MAX: Final = 1.3
@@ -51,6 +51,31 @@ class SonioxCatalog:
     """The full TTS capability catalog keyed by model id."""
 
     models: dict[str, CatalogModel]
+
+
+@dataclass(frozen=True)
+class SttLanguage:
+    """A language code and display name reported for an STT model."""
+
+    code: str
+    name: str
+
+
+type SttLanguagesByModel = dict[str, tuple[SttLanguage, ...]]
+
+
+def stt_languages_for_model(
+    languages_by_model: SttLanguagesByModel, model: str
+) -> tuple[SttLanguage, ...]:
+    """Return a model's languages, or the curated list for an unknown model.
+
+    A custom model id is absent from the live /v1/models payload; the curated
+    list keeps the entity usable instead of advertising no languages.
+    """
+    languages = languages_by_model.get(model)
+    if languages is not None:
+        return languages
+    return tuple(SttLanguage(code=code, name=code) for code in SUPPORTED_LANGUAGES)
 
 
 class CatalogFetchError(HomeAssistantError):
@@ -196,6 +221,66 @@ def parse_catalog(models_payload: Any, voices_payload: Any) -> SonioxCatalog:
     return SonioxCatalog(models=models)
 
 
+def parse_stt_languages(payload: Any) -> SttLanguagesByModel:
+    """Parse the /v1/models JSON payload into per-model language tuples.
+
+    Never raises: malformed input degrades to an empty mapping.
+    """
+    languages_by_model: SttLanguagesByModel = {}
+    if not isinstance(payload, dict):
+        return languages_by_model
+    raw_models = payload.get("models")
+    if not isinstance(raw_models, list):
+        return languages_by_model
+
+    for entry in raw_models:
+        if not isinstance(entry, dict):
+            continue
+        model_id = _string_field(entry, "id")
+        if model_id is None:
+            continue
+        raw_languages = entry.get("languages")
+        if not isinstance(raw_languages, list):
+            continue
+        languages: list[SttLanguage] = []
+        seen: set[str] = set()
+        for raw_language in raw_languages:
+            if not isinstance(raw_language, dict):
+                continue
+            code = _string_field(raw_language, "code")
+            if code is None or code in seen:
+                continue
+            seen.add(code)
+            languages.append(
+                SttLanguage(
+                    code=code,
+                    name=_string_field(raw_language, "name") or code,
+                )
+            )
+        languages_by_model[model_id] = tuple(languages)
+
+    return languages_by_model
+
+
+async def _async_get_json(
+    session: aiohttp.ClientSession,
+    url: str,
+    headers: dict[str, str],
+    timeout: aiohttp.ClientTimeout,
+) -> Any:
+    """GET a JSON document, raising CatalogFetchError on any failure."""
+    try:
+        resp = await session.get(url, headers=headers, timeout=timeout)
+    except aiohttp.ClientError as err:
+        raise CatalogFetchError(f"Soniox request failed: {err}") from err
+    if resp.status >= 400 or resp.status < 200:
+        raise CatalogFetchError(f"Soniox returned HTTP {resp.status}")
+    try:
+        return await resp.json()
+    except (ValueError, aiohttp.ClientError) as err:
+        raise CatalogFetchError("Soniox returned invalid JSON") from err
+
+
 async def async_fetch_catalog(
     session: aiohttp.ClientSession,
     endpoints: SonioxEndpoints,
@@ -205,33 +290,37 @@ async def async_fetch_catalog(
 ) -> SonioxCatalog:
     """Fetch the live TTS catalog (models + custom voices) from Soniox."""
     headers = {"Authorization": f"Bearer {api_key}"}
-
-    async def _get_json(url: str) -> Any:
-        try:
-            resp = await session.get(url, headers=headers, timeout=timeout)
-        except aiohttp.ClientError as err:
-            raise CatalogFetchError(
-                f"Soniox catalog request failed: {err}"
-            ) from err
-        if resp.status >= 400 or resp.status < 200:
-            raise CatalogFetchError(
-                f"Soniox catalog returned HTTP {resp.status}"
-            )
-        try:
-            return await resp.json()
-        except (ValueError, aiohttp.ClientError) as err:
-            raise CatalogFetchError(
-                "Soniox catalog returned invalid JSON"
-            ) from err
-
-    models_payload = await _get_json(endpoints.tts_models_url)
+    models_payload = await _async_get_json(
+        session, endpoints.tts_models_url, headers, timeout
+    )
     if not isinstance(models_payload, dict):
         raise CatalogFetchError(
             "Soniox catalog models payload was not a JSON object"
         )
-    voices_payload = await _get_json(endpoints.voices_url)
+    voices_payload = await _async_get_json(
+        session, endpoints.voices_url, headers, timeout
+    )
     if not isinstance(voices_payload, dict):
         raise CatalogFetchError(
             "Soniox catalog voices payload was not a JSON object"
         )
     return parse_catalog(models_payload, voices_payload)
+
+
+async def async_fetch_stt_languages(
+    session: aiohttp.ClientSession,
+    endpoints: SonioxEndpoints,
+    api_key: str,
+    *,
+    timeout: aiohttp.ClientTimeout = aiohttp.ClientTimeout(total=30),
+) -> SttLanguagesByModel:
+    """Fetch the per-model STT languages from Soniox's /v1/models."""
+    headers = {"Authorization": f"Bearer {api_key}"}
+    payload = await _async_get_json(
+        session, endpoints.stt_models_url, headers, timeout
+    )
+    if not isinstance(payload, dict):
+        raise CatalogFetchError(
+            "Soniox models payload was not a JSON object"
+        )
+    return parse_stt_languages(payload)
