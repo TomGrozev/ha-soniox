@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+> This repository is Tom Grozev's fork of
+> [FrancescoMasaia/ha-soniox](https://github.com/FrancescoMasaia/ha-soniox),
+> continued with significant changes. Entries below the 0.1.x history are
+> from this fork.
+
 ### Added
 
 - An Assist turn now ends as soon as Soniox endpoint detection sends `<end>`,

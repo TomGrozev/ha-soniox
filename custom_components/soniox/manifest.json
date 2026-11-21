@@ -2,7 +2,7 @@
   "domain": "soniox",
   "name": "Soniox",
   "after_dependencies": ["assist_pipeline"],
-  "codeowners": ["@TomGrozev", "@FrancescoMasaia"],
+  "codeowners": ["@TomGrozev"],
   "config_flow": true,
   "dependencies": [],
   "documentation": "https://github.com/TomGrozev/ha-soniox",
